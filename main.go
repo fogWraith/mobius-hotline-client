@@ -3,14 +3,15 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/jhalter/mobius/hotline"
-	"github.com/rivo/tview"
 	"log/slog"
-	"mobius-hotline-client/ui"
 	"os"
 	"os/signal"
 	"runtime"
 	"syscall"
+
+	"github.com/jhalter/mobius-hotline-client/ui"
+	"github.com/jhalter/mobius/hotline"
+	"github.com/rivo/tview"
 )
 
 var logLevels = map[string]slog.Level{

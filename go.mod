@@ -1,4 +1,4 @@
-module mobius-hotline-client
+module github.com/jhalter/mobius-hotline-client
 
 go 1.22
 
