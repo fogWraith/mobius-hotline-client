@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"github.com/gdamore/tcell/v2"
@@ -35,6 +36,7 @@ type Bookmark struct {
 	Addr     string `yaml:"Addr"`
 	Login    string `yaml:"Login"`
 	Password string `yaml:"Password"`
+	TLS      bool   `yaml:"TLS"`
 }
 
 type ClientPrefs struct {
@@ -51,8 +53,8 @@ func (cp *ClientPrefs) IconBytes() []byte {
 	return iconBytes
 }
 
-func (cp *ClientPrefs) AddBookmark(_, addr, login, pass string) {
-	cp.Bookmarks = append(cp.Bookmarks, Bookmark{Addr: addr, Login: login, Password: pass})
+func (cp *ClientPrefs) AddBookmark(_, addr, login, pass string, useTLS bool) {
+	cp.Bookmarks = append(cp.Bookmarks, Bookmark{Addr: addr, Login: login, Password: pass, TLS: useTLS})
 }
 
 type Client struct {
@@ -181,10 +183,11 @@ func (mhc *Client) showBookmarks() *tview.List {
 		addr := srv.Addr
 		login := srv.Login
 		pass := srv.Password
+		useTLS := srv.TLS
 		list.AddItem(srv.Name, srv.Addr, rune(shortcut+i), func() {
 			mhc.Pages.RemovePage("joinServer")
 
-			newJS := mhc.renderJoinServerForm("", addr, login, pass, "bookmarks", true, true)
+			newJS := mhc.renderJoinServerForm("", addr, login, pass, "bookmarks", true, useTLS, true)
 
 			mhc.Pages.AddPage("joinServer", newJS, true, true)
 		})
@@ -209,7 +212,7 @@ func (mhc *Client) getTrackerList(servers []hotline.ServerRecord) *tview.List {
 		list.AddItem(string(srv.Name), string(srv.Description), rune(shortcut+i), func() {
 			mhc.Pages.RemovePage("joinServer")
 
-			newJS := mhc.renderJoinServerForm(string(srv.Name), srv.Addr(), hotline.GuestAccount, "", trackerListPage, false, true)
+			newJS := mhc.renderJoinServerForm(string(srv.Name), srv.Addr(), hotline.GuestAccount, "", trackerListPage, false, false, true)
 
 			mhc.Pages.AddPage("joinServer", newJS, true, true)
 			mhc.Pages.ShowPage("joinServer")
@@ -272,13 +275,48 @@ func (mhc *Client) renderSettingsForm() *tview.Flex {
 	return centerFlex
 }
 
-func (mhc *Client) joinServer(addr, login, password string) error {
+func (mhc *Client) joinServer(addr, login, password string, useTLS bool) error {
 	// append default port to address if no port supplied
 	if len(strings.Split(addr, ":")) == 1 {
-		addr += ":5500"
+		if useTLS {
+			addr += ":5600"
+		} else {
+			addr += ":5500"
+		}
 	}
-	if err := mhc.HLClient.Connect(addr, login, password); err != nil {
-		return fmt.Errorf("Error joining server: %v\n", err)
+
+	var err error
+	if useTLS {
+		// Create TLS connection
+		mhc.HLClient.Connection, err = tls.Dial("tcp", addr, &tls.Config{
+			InsecureSkipVerify: true, // Allow self-signed certificates
+		})
+		if err != nil {
+			return fmt.Errorf("TLS connection error: %v", err)
+		}
+
+		// Perform handshake
+		if err := mhc.HLClient.Handshake(); err != nil {
+			return fmt.Errorf("handshake error: %v", err)
+		}
+
+		// Send login transaction
+		err = mhc.HLClient.Send(
+			hotline.NewTransaction(
+				hotline.TranLogin, [2]byte{0, 0},
+				hotline.NewField(hotline.FieldUserName, []byte(mhc.Pref.Username)),
+				hotline.NewField(hotline.FieldUserIconID, mhc.Pref.IconBytes()),
+				hotline.NewField(hotline.FieldUserLogin, hotline.EncodeString([]byte(login))),
+				hotline.NewField(hotline.FieldUserPassword, hotline.EncodeString([]byte(password))),
+			),
+		)
+		if err != nil {
+			return fmt.Errorf("login error: %v", err)
+		}
+	} else {
+		if err := mhc.HLClient.Connect(addr, login, password); err != nil {
+			return fmt.Errorf("error joining server: %v", err)
+		}
 	}
 
 	go func() {
@@ -301,18 +339,21 @@ func (mhc *Client) joinServer(addr, login, password string) error {
 	return nil
 }
 
-func (mhc *Client) renderJoinServerForm(name, server, login, password, backPage string, save, defaultConnect bool) *tview.Flex {
+func (mhc *Client) renderJoinServerForm(name, server, login, password, backPage string, save, useTLS, defaultConnect bool) *tview.Flex {
 	joinServerForm := tview.NewForm()
 	joinServerForm.
 		AddInputField("Server", server, 0, nil, nil).
 		AddInputField("Login", login, 0, nil, nil).
 		AddPasswordField("Password", password, 0, '*', nil).
+		AddCheckbox("TLS", useTLS, nil).
 		AddCheckbox("Save", save, func(checked bool) {
+			tlsChecked := joinServerForm.GetFormItem(3).(*tview.Checkbox).IsChecked()
 			mhc.Pref.AddBookmark(
 				joinServerForm.GetFormItem(0).(*tview.InputField).GetText(),
 				joinServerForm.GetFormItem(0).(*tview.InputField).GetText(),
 				joinServerForm.GetFormItem(1).(*tview.InputField).GetText(),
 				joinServerForm.GetFormItem(2).(*tview.InputField).GetText(),
+				tlsChecked,
 			)
 
 			out, err := yaml.Marshal(mhc.Pref)
@@ -331,10 +372,12 @@ func (mhc *Client) renderJoinServerForm(name, server, login, password, backPage 
 		AddButton("Connect", func() {
 			srvAddr := joinServerForm.GetFormItem(0).(*tview.InputField).GetText()
 			loginInput := joinServerForm.GetFormItem(1).(*tview.InputField).GetText()
+			tlsChecked := joinServerForm.GetFormItem(3).(*tview.Checkbox).IsChecked()
 			err := mhc.joinServer(
 				srvAddr,
 				loginInput,
 				joinServerForm.GetFormItem(2).(*tview.InputField).GetText(),
+				tlsChecked,
 			)
 			if name == "" {
 				name = fmt.Sprintf("%s@%s", loginInput, srvAddr)
@@ -354,7 +397,7 @@ func (mhc *Client) renderJoinServerForm(name, server, login, password, backPage 
 			}
 
 			// Save checkbox
-			if joinServerForm.GetFormItem(3).(*tview.Checkbox).IsChecked() {
+			if joinServerForm.GetFormItem(4).(*tview.Checkbox).IsChecked() {
 				// TODO: implement bookmark saving
 			}
 		})
@@ -368,7 +411,7 @@ func (mhc *Client) renderJoinServerForm(name, server, login, password, backPage 
 	})
 
 	if defaultConnect {
-		joinServerForm.SetFocus(5)
+		joinServerForm.SetFocus(6)
 	}
 
 	joinServerPage := tview.NewFlex().
@@ -376,7 +419,7 @@ func (mhc *Client) renderJoinServerForm(name, server, login, password, backPage 
 		AddItem(tview.NewFlex().
 			SetDirection(tview.FlexRow).
 			AddItem(nil, 0, 1, false).
-			AddItem(joinServerForm, 14, 1, true).
+			AddItem(joinServerForm, 16, 1, true).
 			AddItem(nil, 0, 1, false), 40, 1, true).
 		AddItem(nil, 0, 1, false)
 
@@ -546,7 +589,7 @@ func (mhc *Client) Start() {
 	)
 
 	mainMenu.AddItem("Join Server", "", 'j', func() {
-		joinServerPage := mhc.renderJoinServerForm("", "", hotline.GuestAccount, "", "home", false, false)
+		joinServerPage := mhc.renderJoinServerForm("", "", hotline.GuestAccount, "", "home", false, false, false)
 		mhc.Pages.AddPage("joinServer", joinServerPage, true, true)
 	}).
 		AddItem("Bookmarks", "", 'b', func() {
