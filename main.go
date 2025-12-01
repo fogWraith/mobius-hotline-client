@@ -5,21 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
 	"runtime"
-	"syscall"
 
+	"github.com/charmbracelet/log"
 	"github.com/jhalter/mobius-hotline-client/ui"
-	"github.com/jhalter/mobius/hotline"
-	"github.com/rivo/tview"
+	"github.com/muesli/termenv"
 )
-
-var logLevels = map[string]slog.Level{
-	"debug": slog.LevelDebug,
-	"info":  slog.LevelInfo,
-	"warn":  slog.LevelWarn,
-	"error": slog.LevelError,
-}
 
 // Values swapped in by go-releaser at build time
 var (
@@ -27,59 +18,28 @@ var (
 )
 
 func main() {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT, os.Interrupt)
-
 	configDir := flag.String("config", defaultConfigPath(), "Path to config root")
-	showVersion := flag.Bool("version", false, "print version and exit")
-	logLevel := flag.String("log-level", "info", "Log level")
-	logFile := flag.String("log-file", "", "output logs to file")
 
 	flag.Parse()
 
-	if *showVersion {
-		fmt.Printf("v%s\n", version)
-		os.Exit(0)
-	}
-
 	// init DebugBuffer
-	db := &ui.DebugBuffer{TextView: tview.NewTextView()}
+	db := &ui.DebugBuffer{}
 
-	// Add file logger if optional log-file flag was passed
-	if *logFile != "" {
-		f, err := os.OpenFile(*logFile,
-			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		defer func() { _ = f.Close() }()
-		if err != nil {
-			panic(err)
-		}
-	}
+	logHandler := log.New(db)
 
-	logger := slog.New(slog.NewTextHandler(db, &slog.HandlerOptions{Level: logLevels[*logLevel]}))
+	// Force color output for logger.
+	// By default, the charm logger package disables color for non-TTY.
+	logHandler.SetColorProfile(termenv.TrueColor)
+	logHandler.SetLevel(log.DebugLevel)
+
+	logger := slog.New(logHandler)
 	logger.Info("Started Mobius client", "Version", version)
 
-	go func() {
-		sig := <-sigChan
-		logger.Info("Stopping client", "signal", sig.String())
-		//cancelRoot()
-	}()
-
-	client := ui.NewUIClient(*configDir, logger, db)
-
-	// Register transaction handlers for transaction types that we should act on.
-	client.HLClient.HandleFunc(hotline.TranChatMsg, client.HandleClientChatMsg)
-	client.HLClient.HandleFunc(hotline.TranLogin, client.HandleClientTranLogin)
-	client.HLClient.HandleFunc(hotline.TranShowAgreement, client.HandleClientTranShowAgreement)
-	client.HLClient.HandleFunc(hotline.TranUserAccess, client.HandleClientTranUserAccess)
-	client.HLClient.HandleFunc(hotline.TranGetUserNameList, client.HandleClientGetUserNameList)
-	client.HLClient.HandleFunc(hotline.TranNotifyChangeUser, client.HandleNotifyChangeUser)
-	client.HLClient.HandleFunc(hotline.TranNotifyChatDeleteUser, client.HandleNotifyDeleteUser)
-	client.HLClient.HandleFunc(hotline.TranGetMsgs, client.TranGetMsgs)
-	client.HLClient.HandleFunc(hotline.TranGetFileNameList, client.HandleGetFileNameList)
-	client.HLClient.HandleFunc(hotline.TranServerMsg, client.HandleTranServerMsg)
-	client.HLClient.HandleFunc(hotline.TranKeepAlive, client.HandleKeepAlive)
-
-	client.Start()
+	model := ui.NewModel(*configDir, logger, db)
+	if err := model.Start(); err != nil {
+		logger.Error("Application error", "err", err)
+		os.Exit(1)
+	}
 }
 
 func defaultConfigPath() (cfgPath string) {
@@ -96,6 +56,7 @@ func defaultConfigPath() (cfgPath string) {
 		cfgPath = "/usr/local/etc/mobius-client-config.yaml"
 	default:
 		fmt.Printf("unsupported OS")
+		os.Exit(1)
 	}
 
 	return cfgPath

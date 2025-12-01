@@ -27,3 +27,5 @@ dist/*
 
 # Ignore the bind mounted config directory
 config/*
+
+.claude

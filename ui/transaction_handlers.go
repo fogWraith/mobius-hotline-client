@@ -6,203 +6,71 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/gdamore/tcell/v2"
-	"github.com/jhalter/mobius/hotline"
-	"github.com/rivo/tview"
 	"math/big"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/jhalter/mobius/hotline"
 )
 
-//var DefaultClientHandlers = map[uint16]hotline.ClientHandler{
-//	hotline.TranChatMsg:          handleClientChatMsg,
-//	hotline.TranLogin:            handleClientTranLogin,
-//	hotline.TranShowAgreement:    handleClientTranShowAgreement,
-//	hotline.TranUserAccess:       handleClientTranUserAccess,
-//	hotline.TranGetUserNameList:  handleClientGetUserNameList,
-//	hotline.TranNotifyChangeUser: handleNotifyChangeUser,
-//	hotline.TranNotifyDeleteUser: handleNotifyDeleteUser,
-//	hotline.TranGetMsgs:          handleGetMsgs,
-//	hotline.TranGetFileNameList:  handleGetFileNameList,
-//	hotline.TranServerMsg:        handleTranServerMsg,
-//	hotline.TranKeepAlive: func(ctx context.Context, client *hotline.Client, transaction *hotline.Transaction) (t []hotline.Transaction, err error) {
-//		return t, err
-//	},
-//}
-
-func (mhc *Client) HandleKeepAlive(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+func (m *Model) HandleKeepAlive(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	return res, err
 }
 
-func (mhc *Client) HandleTranServerMsg(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+func (m *Model) HandleTranServerMsg(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	now := time.Now().Format(time.RFC850)
 
 	msg := strings.ReplaceAll(string(t.GetField(hotline.FieldData).Data), "\r", "\n")
-	msg += "\n\nAt " + now
-	title := fmt.Sprintf("| Private Message From: 	%s |", t.GetField(hotline.FieldUserName).Data)
+	from := string(t.GetField(hotline.FieldUserName).Data)
+	userIDField := t.GetField(hotline.FieldUserID)
+	var userID [2]byte
+	if len(userIDField.Data) >= 2 {
+		copy(userID[:], userIDField.Data[:2])
+	}
 
-	msgBox := tview.NewTextView().SetScrollable(true)
-	msgBox.SetText(msg).SetBackgroundColor(tcell.ColorDarkSlateBlue)
-	msgBox.SetTitle(title).SetBorder(true)
-	msgBox.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
-		case tcell.KeyEscape:
-			mhc.Pages.RemovePage("serverMsgModal" + now)
-		}
-		return event
-	})
-
-	centeredFlex := tview.NewFlex().
-		AddItem(nil, 0, 1, false).
-		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
-			AddItem(nil, 0, 1, false).
-			AddItem(msgBox, 0, 2, true).
-			AddItem(nil, 0, 1, false), 0, 2, true).
-		AddItem(nil, 0, 1, false)
-
-	mhc.Pages.AddPage("serverMsgModal"+now, centeredFlex, true, true)
-	mhc.App.Draw() // TODO: errModal doesn't render without this.  wtf?
+	// Send message to Bubble Tea program to update UI
+	m.program.Send(serverMsgMsg{from: from, userID: userID, text: msg, time: now})
 
 	return res, err
 }
 
-func (mhc *Client) showErrMsg(msg string) {
-	t := time.Now().Format(time.RFC850)
-
-	title := "| Error |"
-
-	msgBox := tview.NewTextView().SetScrollable(true)
-	msgBox.SetText(msg).SetBackgroundColor(tcell.ColorDarkRed)
-	msgBox.SetTitle(title).SetBorder(true)
-	msgBox.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
-		case tcell.KeyEscape:
-			mhc.Pages.RemovePage("serverMsgModal" + t)
-		}
-		return event
-	})
-
-	centeredFlex := tview.NewFlex().
-		AddItem(nil, 0, 1, false).
-		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
-			AddItem(nil, 0, 1, false).
-			AddItem(msgBox, 0, 2, true).
-			AddItem(nil, 0, 1, false), 0, 2, true).
-		AddItem(nil, 0, 1, false)
-
-	mhc.Pages.AddPage("serverMsgModal"+t, centeredFlex, true, true)
-	mhc.App.Draw() // TODO: errModal doesn't render without this.  wtf?
-}
-
-func (mhc *Client) HandleGetFileNameList(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+func (m *Model) HandleGetFileNameList(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	if t.ErrorCode == [4]byte{0, 0, 0, 1} {
-		mhc.showErrMsg(string(t.GetField(hotline.FieldError).Data))
+		m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
+
 		return res, err
 	}
 
-	fTree := tview.NewTreeView().SetTopLevel(1)
-	root := tview.NewTreeNode("Root")
-	fTree.SetRoot(root).SetCurrentNode(root)
-	fTree.SetBorder(true).SetTitle("| Files |")
-	fTree.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
-		case tcell.KeyEscape:
-			mhc.Pages.RemovePage("files")
-			mhc.filePath = []string{}
-		case tcell.KeyEnter:
-			selectedNode := fTree.GetCurrentNode()
-
-			if selectedNode.GetText() == "<- Back" {
-				mhc.filePath = mhc.filePath[:len(mhc.filePath)-1]
-				f := hotline.NewField(hotline.FieldFilePath, hotline.EncodeFilePath(strings.Join(mhc.filePath, "/")))
-
-				if err := mhc.HLClient.Send(hotline.NewTransaction(hotline.TranGetFileNameList, [2]byte{}, f)); err != nil {
-					mhc.HLClient.Logger.Error("err", "err", err)
-				}
-				return event
-			}
-
-			entry := selectedNode.GetReference().(*hotline.FileNameWithInfo)
-
-			if bytes.Equal(entry.Type[:], []byte("fldr")) {
-				c.Logger.Info("get new directory listing", "name", string(entry.Name))
-
-				mhc.filePath = append(mhc.filePath, string(entry.Name))
-				f := hotline.NewField(hotline.FieldFilePath, hotline.EncodeFilePath(strings.Join(mhc.filePath, "/")))
-
-				if err := mhc.HLClient.Send(hotline.NewTransaction(hotline.TranGetFileNameList, [2]byte{}, f)); err != nil {
-					mhc.HLClient.Logger.Error("err", "err", err)
-				}
-			} else {
-				// TODO: initiate file download
-				c.Logger.Info("download file", "name", string(entry.Name))
-			}
-		}
-
-		return event
-	})
-
-	if len(mhc.filePath) > 0 {
-		node := tview.NewTreeNode("<- Back")
-		root.AddChild(node)
-	}
-
+	var files []hotline.FileNameWithInfo
 	for _, f := range t.Fields {
 		var fn hotline.FileNameWithInfo
 		_, err = fn.Write(f.Data)
 		if err != nil {
-			return nil, nil
+			continue
 		}
-
-		if bytes.Equal(fn.Type[:], []byte("fldr")) {
-			node := tview.NewTreeNode(fmt.Sprintf("[blue::]📁 %s[-:-:-]", fn.Name))
-			node.SetReference(&fn)
-			root.AddChild(node)
-		} else {
-			size := binary.BigEndian.Uint32(fn.FileSize[:]) / 1024
-
-			node := tview.NewTreeNode(fmt.Sprintf("   %-40s %10v KB", fn.Name, size))
-			node.SetReference(&fn)
-			root.AddChild(node)
-		}
+		files = append(files, fn)
 	}
 
-	centerFlex := tview.NewFlex().
-		AddItem(nil, 0, 1, false).
-		AddItem(tview.NewFlex().
-			SetDirection(tview.FlexRow).
-			AddItem(nil, 0, 1, false).
-			AddItem(fTree, 20, 1, true).
-			AddItem(nil, 0, 1, false), 60, 1, true).
-		AddItem(nil, 0, 1, false)
-
-	mhc.Pages.AddPage("files", centerFlex, true, true)
-	mhc.App.Draw()
+	// Send files to UI
+	if m.program != nil {
+		m.program.Send(filesMsg{files: files})
+	}
 
 	return res, err
 }
 
-func (mhc *Client) TranGetMsgs(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	newsText := string(t.GetField(hotline.FieldData).Data)
-	newsText = strings.ReplaceAll(newsText, "\r", "\n")
+func (m *Model) TranGetMsgs(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	messageBoardText := string(t.GetField(hotline.FieldData).Data)
+	messageBoardText = strings.ReplaceAll(messageBoardText, "\r", "\n")
 
-	newsTextView := tview.NewTextView().
-		SetText(newsText).
-		SetDoneFunc(func(key tcell.Key) {
-			mhc.Pages.SwitchToPage(serverUIPage)
-			mhc.App.SetFocus(mhc.chatInput)
-		})
-	newsTextView.SetBorder(true).SetTitle("News")
-
-	mhc.Pages.AddPage("news", newsTextView, true, true)
-	// mhc.Pages.SwitchToPage("news")
-	// mhc.App.SetFocus(newsTextView)
-	mhc.App.Draw()
+	// Send message to Bubble Tea program to update UI
+	m.program.Send(messageBoardMsg{text: messageBoardText})
 
 	return res, err
 }
 
-func (mhc *Client) HandleNotifyChangeUser(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+func (m *Model) HandleNotifyChangeUser(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	newUser := hotline.User{
 		ID:    [2]byte(t.GetField(hotline.FieldUserID).Data),
 		Name:  string(t.GetField(hotline.FieldUserName).Data),
@@ -210,20 +78,17 @@ func (mhc *Client) HandleNotifyChangeUser(ctx context.Context, c *hotline.Client
 		Flags: t.GetField(hotline.FieldUserFlags).Data,
 	}
 
-	// Possible cases:
-	// user is new to the server
-	// user is already on the server but has a new name
-
 	var oldName string
 	var newUserList []hotline.User
 	updatedUser := false
-	for _, u := range mhc.UserList {
+
+	for _, u := range m.userList {
 		if newUser.ID == u.ID {
 			oldName = u.Name
-			u.Name = newUser.Name
 			if u.Name != newUser.Name {
-				_, _ = fmt.Fprintf(mhc.chatBox, " <<< "+oldName+" is now known as "+newUser.Name+" >>>\n")
+				m.program.Send(chatMsg{text: fmt.Sprintf(" <<< %s is now known as %s >>>", oldName, newUser.Name)})
 			}
+			u = newUser
 			updatedUser = true
 		}
 		newUserList = append(newUserList, u)
@@ -231,136 +96,396 @@ func (mhc *Client) HandleNotifyChangeUser(ctx context.Context, c *hotline.Client
 
 	if !updatedUser {
 		newUserList = append(newUserList, newUser)
+		// Play sound for user joining
+		if m.soundPlayer != nil {
+			m.soundPlayer.PlayAsync(SoundUserJoin)
+		}
+		// Send join message to chat
+		joinStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("241"))
+		m.program.Send(chatMsg{text: joinStyle.Render(fmt.Sprintf("→ %s joined", newUser.Name))})
 	}
 
-	mhc.UserList = newUserList
-
-	mhc.renderUserList()
+	// Send message to Bubble Tea program to update UI
+	m.program.Send(userListMsg{users: newUserList})
 
 	return res, err
 }
 
-func (mhc *Client) HandleNotifyDeleteUser(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+func (m *Model) HandleNotifyDeleteUser(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	exitUser := t.GetField(hotline.FieldUserID).Data
 
+	// Find the username before removing
+	var leavingUsername string
 	var newUserList []hotline.User
-	for _, u := range mhc.UserList {
+	for _, u := range m.userList {
 		if !bytes.Equal(exitUser, u.ID[:]) {
 			newUserList = append(newUserList, u)
+		} else {
+			leavingUsername = u.Name
 		}
 	}
 
-	mhc.UserList = newUserList
+	// Play sound for user leaving
+	if m.soundPlayer != nil {
+		m.soundPlayer.PlayAsync(SoundUserLeave)
+	}
 
-	mhc.renderUserList()
+	// Send leave message to chat
+	if leavingUsername != "" {
+		leaveStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("241"))
+		m.program.Send(chatMsg{text: leaveStyle.Render(fmt.Sprintf("← %s left", leavingUsername))})
+	}
+
+	// Send message to Bubble Tea program to update UI
+	m.program.Send(userListMsg{users: newUserList})
 
 	return res, err
 }
 
-func (mhc *Client) HandleClientGetUserNameList(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+func (m *Model) HandleClientGetUserNameList(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	var users []hotline.User
 	for _, field := range t.Fields {
-		// The Hotline protocol docs say that ClientGetUserNameList should only return hotline.FieldUserNameWithInfo (300)
-		// fields, but shxd sneaks in FieldChatSubject (115) so it's important to filter explicitly for the expected
-		// field type.  Probably a good idea to do everywhere.
 		if field.Type == hotline.FieldUsernameWithInfo {
 			var user hotline.User
 			if _, err := user.Write(field.Data); err != nil {
 				return res, fmt.Errorf("unable to read user data: %w", err)
 			}
-
 			users = append(users, user)
 		}
 	}
-	mhc.UserList = users
-	mhc.renderUserList()
+
+	// Send message to Bubble Tea program to update UI
+	m.program.Send(userListMsg{users: users})
 
 	return res, err
 }
 
-func (mhc *Client) renderUserList() {
-	mhc.userList.Clear()
-	for _, u := range mhc.UserList {
+func (m *Model) updateUserListDisplay() {
+	var userListContent strings.Builder
+	for _, u := range m.userList {
 		flagBitmap := big.NewInt(int64(binary.BigEndian.Uint16(u.Flags)))
-		if flagBitmap.Bit(hotline.UserFlagAdmin) == 1 {
-			_, _ = fmt.Fprintf(mhc.userList, "[red::b]%s[-:-:-]\n", u.Name)
+		isAdmin := flagBitmap.Bit(hotline.UserFlagAdmin) == 1
+		isAway := flagBitmap.Bit(hotline.UserFlagAway) == 1
+
+		userName := u.Name
+
+		if isAdmin && isAway {
+			userListContent.WriteString(awayAdminUserStyle.Render(userName))
+		} else if isAdmin {
+			userListContent.WriteString(adminUserStyle.Render(userName))
+		} else if isAway {
+			userListContent.WriteString(awayUserStyle.Render(userName))
 		} else {
-			_, _ = fmt.Fprintf(mhc.userList, "%s\n", u.Name)
+			userListContent.WriteString(userName)
 		}
-		// TODO: fade if user is away
+		userListContent.WriteString("\n")
 	}
+	m.userViewport.SetContent(userListContent.String())
 }
 
-func (mhc *Client) HandleClientChatMsg(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	if c.Pref.EnableBell {
-		fmt.Println("\a")
+func (m *Model) HandleClientChatMsg(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	// Play sound for chat message
+	if m.soundPlayer != nil {
+		m.soundPlayer.PlayAsync(SoundChatMsg)
 	}
 
-	_, _ = fmt.Fprintf(mhc.chatBox, "%s \n", t.GetField(hotline.FieldData).Data)
+	// Terminal bell (independent of sounds)
+	if m.prefs.EnableBell {
+		fmt.Print("\a")
+	}
+
+	chatText := string(t.GetField(hotline.FieldData).Data)
+	chatText = strings.ReplaceAll(chatText, "\r", "")
+	// Send message to Bubble Tea program to update UI
+	m.program.Send(chatMsg{text: chatText})
 
 	return res, err
 }
 
-func (mhc *Client) HandleClientTranUserAccess(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	mhc.UserAccess = t.GetField(hotline.FieldUserAccess).Data
-
+func (m *Model) HandleClientTranUserAccess(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	m.userAccess = t.GetField(hotline.FieldUserAccess).Data
 	return res, err
 }
 
-func (mhc *Client) HandleClientTranShowAgreement(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+func (m *Model) HandleClientTranShowAgreement(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	agreement := string(t.GetField(hotline.FieldData).Data)
 	agreement = strings.ReplaceAll(agreement, "\r", "\n")
 
-	agreeModal := tview.NewModal().
-		SetText(agreement).
-		AddButtons([]string{"Agree", "Disagree"}).
-		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-			if buttonIndex == 0 {
-				res = append(res,
-					hotline.NewTransaction(
-						hotline.TranAgreed, [2]byte{},
-						hotline.NewField(hotline.FieldUserName, []byte(c.Pref.Username)),
-						hotline.NewField(hotline.FieldUserIconID, c.Pref.IconBytes()),
-						hotline.NewField(hotline.FieldUserFlags, []byte{0x00, 0x00}),
-						hotline.NewField(hotline.FieldOptions, []byte{0x00, 0x00}),
-					),
-				)
-				mhc.Pages.HidePage("agreement")
-				mhc.App.SetFocus(mhc.chatInput)
-			} else {
-				_ = c.Disconnect()
-				mhc.Pages.SwitchToPage("home")
-			}
-		},
-		)
-
-	mhc.Pages.AddPage("agreement", agreeModal, false, true)
+	// Show agreement modal with Agree/Disagree options
+	m.program.Send(agreementMsg{text: agreement})
 
 	return res, err
 }
 
-func (mhc *Client) HandleClientTranLogin(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+func (m *Model) HandleClientTranLogin(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
 		errMsg := string(t.GetField(hotline.FieldError).Data)
-		errModal := tview.NewModal()
-		errModal.SetText(errMsg)
-		errModal.AddButtons([]string{"Oh no"})
-		errModal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-			mhc.Pages.RemovePage("errModal")
-		})
-		mhc.Pages.RemovePage("joinServer")
-		mhc.Pages.AddPage("errModal", errModal, false, true)
 
-		mhc.App.Draw() // TODO: errModal doesn't render without this.  wtf?
+		m.program.Send(errorMsg{text: errMsg})
 
-		c.Logger.Error(string(t.GetField(hotline.FieldError).Data))
-		return nil, errors.New("login error: " + string(t.GetField(hotline.FieldError).Data))
+		c.Logger.Error(errMsg)
+		return nil, errors.New("login error: " + errMsg)
 	}
-	mhc.Pages.AddAndSwitchToPage(serverUIPage, mhc.renderServerUI(), true)
-	mhc.App.SetFocus(mhc.chatInput)
+
+	// Send server connected message with the name to display
+	m.program.Send(serverConnectedMsg{name: m.pendingServerName})
 
 	if err := c.Send(hotline.NewTransaction(hotline.TranGetUserNameList, [2]byte{})); err != nil {
 		c.Logger.Error("err", "err", err)
 	}
+
+	return res, err
+}
+
+func (m *Model) HandleDownloadFile(ctx context.Context, c *hotline.Client, t *hotline.Transaction) ([]hotline.Transaction, error) {
+	refNum := t.GetField(hotline.FieldRefNum).Data
+	transferSize := binary.BigEndian.Uint32(t.GetField(hotline.FieldTransferSize).Data)
+	fileSize := binary.BigEndian.Uint32(t.GetField(hotline.FieldFileSize).Data)
+
+	if m.program != nil {
+		var refNumBytes [4]byte
+		copy(refNumBytes[:], refNum)
+
+		m.program.Send(downloadReplyMsg{
+			txID:         t.ID,
+			refNum:       refNumBytes,
+			transferSize: transferSize,
+			fileSize:     fileSize,
+		})
+	}
+
+	return nil, nil
+}
+
+func (m *Model) HandleUploadFile(ctx context.Context, c *hotline.Client, t *hotline.Transaction) ([]hotline.Transaction, error) {
+	refNum := t.GetField(hotline.FieldRefNum).Data
+
+	if m.program != nil {
+		var refNumBytes [4]byte
+		copy(refNumBytes[:], refNum)
+
+		m.program.Send(uploadReplyMsg{
+			txID:   t.ID,
+			refNum: refNumBytes,
+		})
+	}
+
+	return nil, nil
+}
+
+func (m *Model) HandleGetNewsCatNameList(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	if t.ErrorCode == [4]byte{0, 0, 0, 1} {
+		if m.program != nil {
+			m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
+		}
+		return res, err
+	}
+
+	var categories []newsItem
+
+	// Parse category list data from transaction fields
+	for _, f := range t.Fields {
+		m.logger.Debug("type", "f.Type", f.Type, "catlist", f.Type == hotline.FieldNewsCatListData15)
+		if f.Type == hotline.FieldNewsCatListData15 {
+			var catData hotline.NewsCategoryListData15
+			_, err = catData.Write(f.Data)
+			if err != nil {
+				m.logger.Error("Error parsing category data", "err", err)
+				continue
+			}
+
+			// Determine if this is a bundle or category
+			isBundle := bytes.Equal(catData.Type[:], hotline.NewsBundle[:])
+
+			categories = append(categories, newsItem{
+				name:     catData.Name,
+				isBundle: isBundle,
+			})
+		}
+	}
+
+	// Send categories to UI
+	m.program.Send(newsCategoriesMsg{categories: categories})
+
+	return res, err
+}
+
+func (m *Model) HandleGetNewsArtNameList(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	if t.ErrorCode == [4]byte{0, 0, 0, 1} {
+		m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
+		return res, err
+	}
+
+	var articles []newsArticleItem
+
+	// Get the NewsArtListData field
+	artListField := t.GetField(hotline.FieldNewsArtListData)
+	//if len(artListField.Data) == 0 {
+	//	// No articles in this category
+	//	if m.program != nil {
+	//		m.program.Send(newsArticlesMsg{articles: articles})
+	//	}
+	//	return res, err
+	//}
+
+	// Parse the NewsArtListData using the Write method
+	var artListData hotline.NewsArtListData
+	_, err = artListData.Write(artListField.Data)
+	if err != nil {
+		m.logger.Error("Error parsing article list data", "err", err)
+		return res, err
+	}
+
+	// Parse individual articles from the NewsArtList payload
+	data := artListData.NewsArtList
+	offset := 0
+	for i := 0; i < artListData.Count && offset < len(data); i++ {
+		if offset+4 > len(data) {
+			break
+		}
+
+		// Read article ID (4 bytes)
+		articleID := binary.BigEndian.Uint32(data[offset : offset+4])
+		offset += 4
+
+		// Read timestamp (8 bytes), parent ID (4 bytes), then skip flags (4 bytes) and flavor count (2 bytes)
+		if offset+18 > len(data) {
+			break
+		}
+		timestamp := [8]byte{}
+		copy(timestamp[:], data[offset:offset+8])
+		offset += 8
+
+		// Read parent ID (4 bytes)
+		parentID := binary.BigEndian.Uint32(data[offset : offset+4])
+		offset += 4
+
+		offset += 4 + 2 // skip flags + flavor count
+
+		// Read title (1 byte length + data)
+		if offset+1 > len(data) {
+			break
+		}
+		titleLen := int(data[offset])
+		offset++
+		if offset+titleLen > len(data) {
+			break
+		}
+		title := string(data[offset : offset+titleLen])
+		offset += titleLen
+
+		// Read poster (1 byte length + data)
+		if offset+1 > len(data) {
+			break
+		}
+		posterLen := int(data[offset])
+		offset++
+		if offset+posterLen > len(data) {
+			break
+		}
+		poster := string(data[offset : offset+posterLen])
+		offset += posterLen
+
+		// Skip flavor text (1 byte length + data) and article size (2 bytes)
+		if offset+1 > len(data) {
+			break
+		}
+		flavorLen := int(data[offset])
+		offset++
+		if offset+flavorLen+2 > len(data) {
+			break
+		}
+		offset += flavorLen + 2 // skip flavor + article size
+
+		articles = append(articles, newsArticleItem{
+			id:          articleID,
+			title:       title,
+			poster:      poster,
+			date:        timestamp,
+			parentID:    parentID,
+			depth:       0,
+			isExpanded:  false,
+			hasChildren: false,
+		})
+	}
+
+	// Send articles to UI
+	if m.program != nil {
+		m.program.Send(newsArticlesMsg{articles: articles})
+	}
+
+	return res, err
+}
+
+func (m *Model) HandleGetNewsArtData(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	if t.ErrorCode == [4]byte{0, 0, 0, 1} {
+		if m.program != nil {
+			m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
+		}
+		return res, err
+	}
+
+	// Parse article data from transaction fields
+	var article hotline.NewsArtData
+	article.Title = string(t.GetField(hotline.FieldNewsArtTitle).Data)
+	article.Poster = string(t.GetField(hotline.FieldNewsArtPoster).Data)
+	article.Data = string(t.GetField(hotline.FieldNewsArtData).Data)
+	article.Data = strings.ReplaceAll(article.Data, "\r", "\n")
+
+	dateField := t.GetField(hotline.FieldNewsArtDate)
+	if len(dateField.Data) >= 8 {
+		copy(article.Date[:], dateField.Data[:8])
+	}
+
+	// Send article to UI
+	if m.program != nil {
+		m.program.Send(newsArticleDataMsg{article: article})
+	}
+
+	return res, err
+}
+
+func (m *Model) HandlePostNewsArt(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	// Check for errors
+	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
+		errMsg := string(t.GetField(hotline.FieldError).Data)
+		if m.program != nil {
+			m.program.Send(errorMsg{text: "Failed to post article: " + errMsg})
+		}
+		m.logger.Error("Error posting news article", "error", errMsg)
+		return res, err
+	}
+
+	m.logger.Info("News article posted successfully")
+	return res, err
+}
+
+func (m *Model) HandleNewNewsFldr(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	// Check for errors
+	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
+		errMsg := string(t.GetField(hotline.FieldError).Data)
+		if m.program != nil {
+			m.program.Send(errorMsg{text: "Failed to create bundle: " + errMsg})
+		}
+		m.logger.Error("Error creating news bundle", "error", errMsg)
+		return res, err
+	}
+
+	m.logger.Info("News bundle created successfully")
+	return res, err
+}
+
+func (m *Model) HandleNewNewsCat(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	// Check for errors
+	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
+		errMsg := string(t.GetField(hotline.FieldError).Data)
+		if m.program != nil {
+			m.program.Send(errorMsg{text: "Failed to create category: " + errMsg})
+		}
+		m.logger.Error("Error creating news category", "error", errMsg)
+		return res, err
+	}
+
+	m.logger.Info("News category created successfully")
 	return res, err
 }
