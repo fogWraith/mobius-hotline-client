@@ -51,6 +51,8 @@ func defaultConfigPath() (cfgPath string) {
 			cfgPath = "/usr/local/etc/mobius-client-config.yaml"
 		} else if _, err := os.Stat("/opt/homebrew/etc/mobius-client-config.yaml"); err == nil {
 			cfgPath = "/opt/homebrew/etc/mobius-client-config.yaml"
+		} else {
+			cfgPath = "mobius-client-config.yaml"
 		}
 	case "linux":
 		cfgPath = "/usr/local/etc/mobius-client-config.yaml"

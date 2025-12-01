@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -52,10 +53,7 @@ func (m *Model) HandleGetFileNameList(ctx context.Context, c *hotline.Client, t 
 		files = append(files, fn)
 	}
 
-	// Send files to UI
-	if m.program != nil {
-		m.program.Send(filesMsg{files: files})
-	}
+	m.program.Send(filesMsg{files: files})
 
 	return res, err
 }
@@ -203,7 +201,12 @@ func (m *Model) HandleClientChatMsg(ctx context.Context, c *hotline.Client, t *h
 }
 
 func (m *Model) HandleClientTranUserAccess(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	m.userAccess = t.GetField(hotline.FieldUserAccess).Data
+	copy(m.userAccess[:], t.GetField(hotline.FieldUserAccess).Data)
+	m.logger.Debug("Permissions", "AccessNewsDeleteArt", m.userAccess.IsSet(hotline.AccessNewsDeleteArt))
+
+	m.serverUIKeys.News.SetEnabled(m.userAccess.IsSet(hotline.AccessNewsReadArt))
+	m.serverUIKeys.Accounts.SetEnabled(m.userAccess.IsSet(hotline.AccessModifyUser))
+
 	return res, err
 }
 
@@ -223,7 +226,7 @@ func (m *Model) HandleClientTranLogin(ctx context.Context, c *hotline.Client, t 
 
 		m.program.Send(errorMsg{text: errMsg})
 
-		c.Logger.Error(errMsg)
+		m.logger.Error(errMsg)
 		return nil, errors.New("login error: " + errMsg)
 	}
 
@@ -231,7 +234,7 @@ func (m *Model) HandleClientTranLogin(ctx context.Context, c *hotline.Client, t 
 	m.program.Send(serverConnectedMsg{name: m.pendingServerName})
 
 	if err := c.Send(hotline.NewTransaction(hotline.TranGetUserNameList, [2]byte{})); err != nil {
-		c.Logger.Error("err", "err", err)
+		m.logger.Error("err", "err", err)
 	}
 
 	return res, err
@@ -242,17 +245,15 @@ func (m *Model) HandleDownloadFile(ctx context.Context, c *hotline.Client, t *ho
 	transferSize := binary.BigEndian.Uint32(t.GetField(hotline.FieldTransferSize).Data)
 	fileSize := binary.BigEndian.Uint32(t.GetField(hotline.FieldFileSize).Data)
 
-	if m.program != nil {
-		var refNumBytes [4]byte
-		copy(refNumBytes[:], refNum)
+	var refNumBytes [4]byte
+	copy(refNumBytes[:], refNum)
 
-		m.program.Send(downloadReplyMsg{
-			txID:         t.ID,
-			refNum:       refNumBytes,
-			transferSize: transferSize,
-			fileSize:     fileSize,
-		})
-	}
+	m.program.Send(downloadReplyMsg{
+		txID:         t.ID,
+		refNum:       refNumBytes,
+		transferSize: transferSize,
+		fileSize:     fileSize,
+	})
 
 	return nil, nil
 }
@@ -260,24 +261,77 @@ func (m *Model) HandleDownloadFile(ctx context.Context, c *hotline.Client, t *ho
 func (m *Model) HandleUploadFile(ctx context.Context, c *hotline.Client, t *hotline.Transaction) ([]hotline.Transaction, error) {
 	refNum := t.GetField(hotline.FieldRefNum).Data
 
-	if m.program != nil {
-		var refNumBytes [4]byte
-		copy(refNumBytes[:], refNum)
+	var refNumBytes [4]byte
+	copy(refNumBytes[:], refNum)
 
-		m.program.Send(uploadReplyMsg{
-			txID:   t.ID,
-			refNum: refNumBytes,
-		})
-	}
+	m.program.Send(uploadReplyMsg{
+		txID:   t.ID,
+		refNum: refNumBytes,
+	})
 
 	return nil, nil
 }
 
+func (m *Model) HandleListUsers(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
+		m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
+		return res, err
+	}
+
+	var accounts []accountItem
+
+	// Each FieldData contains one account
+	for i, field := range t.Fields {
+		if field.Type != hotline.FieldData {
+			continue
+		}
+
+		var acct accountItem
+		acct.index = i
+
+		// Parse sub-fields from FieldData using scanner
+		scanner := bufio.NewScanner(bytes.NewReader(field.Data[2:]))
+		scanner.Split(hotline.FieldScanner)
+
+		fieldCount := int(binary.BigEndian.Uint16(field.Data[0:2]))
+
+		// Read each sub-field
+		for j := 0; j < fieldCount; j++ {
+			if !scanner.Scan() {
+				break
+			}
+
+			var subField hotline.Field
+			if _, err := subField.Write(scanner.Bytes()); err != nil {
+				m.logger.Error("Error reading sub-field", "err", err)
+				break
+			}
+
+			switch subField.Type {
+			case hotline.FieldUserLogin:
+				acct.login = string(hotline.EncodeString(subField.Data))
+			case hotline.FieldUserName:
+				acct.name = string(subField.Data)
+			case hotline.FieldUserAccess:
+				if len(subField.Data) >= 8 {
+					copy(acct.access[:], subField.Data)
+				}
+			case hotline.FieldUserPassword:
+				acct.hasPass = len(subField.Data) > 0
+			}
+		}
+
+		accounts = append(accounts, acct)
+	}
+
+	m.program.Send(accountListMsg{accounts: accounts})
+	return res, err
+}
+
 func (m *Model) HandleGetNewsCatNameList(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	if t.ErrorCode == [4]byte{0, 0, 0, 1} {
-		if m.program != nil {
-			m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
-		}
+		m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
+
 		return res, err
 	}
 
@@ -320,13 +374,6 @@ func (m *Model) HandleGetNewsArtNameList(ctx context.Context, c *hotline.Client,
 
 	// Get the NewsArtListData field
 	artListField := t.GetField(hotline.FieldNewsArtListData)
-	//if len(artListField.Data) == 0 {
-	//	// No articles in this category
-	//	if m.program != nil {
-	//		m.program.Send(newsArticlesMsg{articles: articles})
-	//	}
-	//	return res, err
-	//}
 
 	// Parse the NewsArtListData using the Write method
 	var artListData hotline.NewsArtListData
@@ -410,18 +457,15 @@ func (m *Model) HandleGetNewsArtNameList(ctx context.Context, c *hotline.Client,
 	}
 
 	// Send articles to UI
-	if m.program != nil {
-		m.program.Send(newsArticlesMsg{articles: articles})
-	}
+	m.program.Send(newsArticlesMsg{articles: articles})
 
 	return res, err
 }
 
 func (m *Model) HandleGetNewsArtData(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	if t.ErrorCode == [4]byte{0, 0, 0, 1} {
-		if m.program != nil {
-			m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
-		}
+		m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
+
 		return res, err
 	}
 
@@ -438,9 +482,7 @@ func (m *Model) HandleGetNewsArtData(ctx context.Context, c *hotline.Client, t *
 	}
 
 	// Send article to UI
-	if m.program != nil {
-		m.program.Send(newsArticleDataMsg{article: article})
-	}
+	m.program.Send(newsArticleDataMsg{article: article})
 
 	return res, err
 }
@@ -449,9 +491,7 @@ func (m *Model) HandlePostNewsArt(ctx context.Context, c *hotline.Client, t *hot
 	// Check for errors
 	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
 		errMsg := string(t.GetField(hotline.FieldError).Data)
-		if m.program != nil {
-			m.program.Send(errorMsg{text: "Failed to post article: " + errMsg})
-		}
+		m.program.Send(errorMsg{text: "Failed to post article: " + errMsg})
 		m.logger.Error("Error posting news article", "error", errMsg)
 		return res, err
 	}
@@ -464,9 +504,8 @@ func (m *Model) HandleNewNewsFldr(ctx context.Context, c *hotline.Client, t *hot
 	// Check for errors
 	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
 		errMsg := string(t.GetField(hotline.FieldError).Data)
-		if m.program != nil {
-			m.program.Send(errorMsg{text: "Failed to create bundle: " + errMsg})
-		}
+		m.program.Send(errorMsg{text: "Failed to create bundle: " + errMsg})
+
 		m.logger.Error("Error creating news bundle", "error", errMsg)
 		return res, err
 	}
@@ -476,12 +515,12 @@ func (m *Model) HandleNewNewsFldr(ctx context.Context, c *hotline.Client, t *hot
 }
 
 func (m *Model) HandleNewNewsCat(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	m.program.Send(errorMsg{text: "Failed to create category: " + "errMsg"})
 	// Check for errors
 	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
 		errMsg := string(t.GetField(hotline.FieldError).Data)
-		if m.program != nil {
-			m.program.Send(errorMsg{text: "Failed to create category: " + errMsg})
-		}
+		m.program.Send(errorMsg{text: "Failed to create category: " + errMsg})
+
 		m.logger.Error("Error creating news category", "error", errMsg)
 		return res, err
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jhalter/mobius/hotline"
+	"github.com/muesli/gamut"
 	"github.com/muesli/reflow/wordwrap"
 	"gopkg.in/yaml.v3"
 )
@@ -56,6 +58,7 @@ const (
 	ScreenLogs
 	ScreenModal
 	ScreenTasks
+	ScreenAccounts
 )
 
 // Messages
@@ -300,10 +303,6 @@ func (m *Model) refreshNewsArticleList() {
 	visibleArticles := m.filterVisibleArticles(m.allArticles)
 
 	var items []list.Item
-	items = append(items, newsItem{
-		name:     "<- Back",
-		isBundle: true,
-	})
 
 	for _, art := range visibleArticles {
 		art.isExpanded = m.expandedArticles[art.id]
@@ -330,6 +329,49 @@ type selectedArticleData struct {
 	content string
 }
 
+// Account management types
+type accountListMsg struct {
+	accounts []accountItem
+}
+
+type accountItem struct {
+	login   string
+	name    string
+	hasPass bool
+	access  hotline.AccessBitmap
+	index   int
+}
+
+func (a accountItem) FilterValue() string { return a.login }
+func (a accountItem) Title() string       { return a.login }
+func (a accountItem) Description() string {
+	desc := a.name
+	if a.hasPass {
+		desc += " [password set]"
+	}
+	return desc
+}
+
+type selectedAccountData struct {
+	login          string
+	name           string
+	originalAccess hotline.AccessBitmap
+	hasPassword    bool
+}
+
+type accessBitInfo struct {
+	bit         int
+	name        string
+	description string
+}
+
+// Focus indices for account editor (beyond checkboxes)
+const (
+	focusLogin = 41 // Login field
+	focusName  = 42 // Display name field
+	focusPass  = 43 // Password field
+)
+
 // Model
 type Model struct {
 	// Configuration
@@ -354,7 +396,7 @@ type Model struct {
 	serverName        string
 	pendingServerName string // Name to display when connection succeeds (from bookmark/tracker/address)
 	pendingServerAddr string // Address being connected to
-	userAccess        []byte
+	userAccess        hotline.AccessBitmap
 	userList          []hotline.User
 
 	// Join server form
@@ -412,14 +454,30 @@ type Model struct {
 	replyParentArticleID uint32    // Parent article ID when replying (0 for new posts)
 
 	// Threaded News
-	newsList         list.Model
-	newsPath         []string             // Track current location in news hierarchy
-	showNewsModal    bool                 // Display news as modal over server UI
-	selectedArticle  *selectedArticleData // Currently selected article
-	pendingArticleID uint32               // Article ID of pending request for tracking
-	articleViewport  viewport.Model       // For scrolling article content
-	allArticles      []newsArticleItem    // Complete article set
-	expandedArticles map[uint32]bool      // Track expanded state
+	newsList          list.Model
+	newsPath          []string             // Track current location in news hierarchy
+	isViewingCategory bool                 // true = viewing category (articles), false = viewing bundle/root
+	showNewsModal     bool                 // Display news as modal over server UI
+	selectedArticle   *selectedArticleData // Currently selected article
+	pendingArticleID  uint32               // Article ID of pending request for tracking
+	articleViewport   viewport.Model       // For scrolling article content
+	allArticles       []newsArticleItem    // Complete article set
+	expandedArticles  map[uint32]bool      // Track expanded state
+
+	// Account management
+	accountList          list.Model           // Bubble Tea list component
+	allAccounts          []accountItem        // Complete account dataset
+	selectedAccount      *selectedAccountData // Currently selected account
+	showAccountsModal    bool                 // Display accounts screen
+	accountDetailFocused bool                 // true = detail pane focused, false = list pane focused
+	editedAccessBits     hotline.AccessBitmap // Working copy of permissions
+	editedName           string               // Working copy of display name
+	editedLogin          string               // Working copy of login name
+	editedPassword       string               // Working copy of password
+	focusedAccessBit     int                  // Currently focused checkbox (0-40, or 41+ for other fields)
+	accountsViewport     viewport.Model       // For scrolling account details
+	isNewAccount         bool                 // Creating new vs editing existing
+	passwordChanged      bool                 // Track if password was modified
 
 	// Files
 	fileList       list.Model
@@ -457,34 +515,34 @@ type Model struct {
 var (
 	// Styling for the main server screen title.
 	serverTitleStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("170"))
+				Bold(true).
+				Foreground(lipgloss.Color("170"))
 
 	subTitleStyle = lipgloss.NewStyle().
-		Bold(true).
-		Padding(0, 0, 1).
-		Foreground(lipgloss.Color("170"))
+			Bold(true).
+			Padding(0, 0, 1).
+			Foreground(lipgloss.Color("170"))
 
 	boxStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
-		Padding(0, 1)
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("63")).
+			Padding(0, 1)
 
 	selectedItemStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("170")).
-		Bold(true)
+				Foreground(lipgloss.Color("170")).
+				Bold(true)
 
 	adminUserStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("196")).
-		Bold(true)
+			Foreground(lipgloss.Color("196")).
+			Bold(true)
 
 	awayUserStyle = lipgloss.NewStyle().
-		Faint(true)
+			Faint(true)
 
 	awayAdminUserStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("196")).
-		Bold(true).
-		Faint(true)
+				Foreground(lipgloss.Color("196")).
+				Bold(true).
+				Faint(true)
 )
 
 // Initialize logs viewport help and key bindings
@@ -581,6 +639,10 @@ func NewModel(cfgPath string, logger *slog.Logger, db *DebugBuffer) *Model {
 		Logs: key.NewBinding(
 			key.WithKeys("ctrl+l"),
 			key.WithHelp("^L", "logs"),
+		),
+		Accounts: key.NewBinding(
+			key.WithKeys("ctrl+a"),
+			key.WithHelp("^A", "accounts"),
 		),
 		Disconnect: key.NewBinding(
 			key.WithKeys("esc"),
@@ -1244,6 +1306,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case newsCategoriesMsg:
 		m.logger.Info("Received news categories message", "count", len(msg.categories))
 		m.initializeNewsCategoryList(msg.categories)
+		m.isViewingCategory = false // Viewing bundle/root
 		m.showNewsModal = true
 
 		return m, nil
@@ -1251,6 +1314,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case newsArticlesMsg:
 		m.logger.Info("Received news articles message", "count", len(msg.articles))
 		m.initializeNewsArticleList(msg.articles)
+		m.isViewingCategory = true // Viewing category (even if 0 articles)
 		m.showNewsModal = true
 		// Keep currentScreen as ScreenServerUI
 		return m, nil
@@ -1266,6 +1330,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			content: msg.article.Data,
 		}
 		m.pendingArticleID = 0 // Clear pending ID
+		return m, nil
+
+	case accountListMsg:
+		m.logger.Info("Received account list message", "count", len(msg.accounts))
+		m.initializeAccountList(msg.accounts)
+		m.currentScreen = ScreenAccounts
+		m.showAccountsModal = true
 		return m, nil
 
 	case taskProgressMsg:
@@ -1380,13 +1451,15 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			case ScreenBookmarks, ScreenTracker, ScreenSettings:
 				m.currentScreen = ScreenHome
-			case ScreenNews, ScreenNewsPost, ScreenMessageBoard, ScreenFiles, ScreenModal, ScreenTasks:
+			case ScreenNews, ScreenNewsPost, ScreenMessageBoard, ScreenFiles, ScreenModal, ScreenTasks, ScreenAccounts:
 				m.currentScreen = ScreenServerUI
 			case ScreenLogs:
 				m.currentScreen = m.previousScreen
 			case ScreenServerUI:
-				// Show disconnect modal
-				m.modalTitle = "Disconnect from the server?"
+				blends := gamut.Blends(lipgloss.Color("#F25D94"), lipgloss.Color("#EDFF82"), 50)
+
+				question := lipgloss.NewStyle().Width(50).Align(lipgloss.Center).Render(rainbow(lipgloss.NewStyle(), "Disconnect from the server?", blends))
+				m.modalContent = question
 				m.modalButtons = []string{"Cancel", "Exit"}
 				m.previousScreen = ScreenServerUI
 				m.currentScreen = ScreenModal
@@ -1436,6 +1509,8 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleModalKeys(msg)
 	case ScreenTasks:
 		return m.handleTasksKeys(msg)
+	case ScreenAccounts:
+		return m.handleAccountsKeys(msg)
 	}
 
 	return m, nil
@@ -1449,15 +1524,6 @@ func (m *Model) View() string {
 
 	// Render file picker modal if active
 	if m.showFilePicker {
-
-		// Create styled modal
-		//modal := lipgloss.NewStyle().
-		//	Width(80).
-		//	Height(25).
-		//	Border(lipgloss.RoundedBorder()).
-		//	BorderForeground(lipgloss.Color("62")).
-		//	Padding(1, 2)
-
 		return lipgloss.Place(
 			m.width,
 			m.height,
@@ -1501,9 +1567,11 @@ func (m *Model) View() string {
 		return m.renderModal()
 	case ScreenTasks:
 		return m.renderTasks()
+	case ScreenAccounts:
+		return m.renderAccounts()
 	}
 
-	return "Unknown screen"
+	return ""
 }
 
 func (m *Model) initializeViewports() {
@@ -1545,6 +1613,11 @@ func (m *Model) initializeViewports() {
 
 	m.logsViewport = viewport.New(m.width-10, m.height-10)
 	m.logsViewport.KeyMap = viewport.DefaultKeyMap() // Enable default viewport key bindings
+
+	// Account details viewport
+	accountDetailWidth := (m.width / 2) - 4
+	accountDetailHeight := m.height - 12
+	m.accountsViewport = viewport.New(accountDetailWidth, accountDetailHeight)
 }
 
 func (m *Model) initiateFileUpload(localPath string) tea.Cmd {
@@ -1628,6 +1701,7 @@ func (m *Model) Start() error {
 	m.hlClient.HandleFunc(hotline.TranKeepAlive, m.HandleKeepAlive)
 	m.hlClient.HandleFunc(hotline.TranDownloadFile, m.HandleDownloadFile)
 	m.hlClient.HandleFunc(hotline.TranUploadFile, m.HandleUploadFile)
+	m.hlClient.HandleFunc(hotline.TranListUsers, m.HandleListUsers)
 	m.hlClient.HandleFunc(hotline.TranGetNewsCatNameList, m.HandleGetNewsCatNameList)
 	m.hlClient.HandleFunc(hotline.TranGetNewsArtNameList, m.HandleGetNewsArtNameList)
 	m.hlClient.HandleFunc(hotline.TranGetNewsArtData, m.HandleGetNewsArtData)
@@ -1735,4 +1809,85 @@ func (m *Model) rebuildChatContent() {
 
 	m.chatContent = content.String()
 	m.chatViewport.SetContent(m.chatContent)
+}
+
+// submitAccountChanges submits account updates to the server
+func (m *Model) submitAccountChanges() tea.Cmd {
+	return func() tea.Msg {
+		// Build sub-fields
+		subFields := []hotline.Field{
+			hotline.NewField(hotline.FieldUserLogin,
+				hotline.EncodeString([]byte(m.editedLogin))),
+			hotline.NewField(hotline.FieldUserName, []byte(m.editedName)),
+			hotline.NewField(hotline.FieldUserAccess, m.editedAccessBits[:]),
+		}
+
+		// Handle password
+		if m.passwordChanged {
+			if len(m.editedPassword) > 0 {
+				subFields = append(subFields,
+					hotline.NewField(hotline.FieldUserPassword, []byte(m.editedPassword)))
+			}
+			// If password is empty and changed, don't include field (removes password)
+		} else {
+			// Keep existing password
+			subFields = append(subFields,
+				hotline.NewField(hotline.FieldUserPassword, []byte{0}))
+		}
+
+		// Serialize sub-fields
+		var fieldData []byte
+		subFieldCount := make([]byte, 2)
+		binary.BigEndian.PutUint16(subFieldCount, uint16(len(subFields)))
+		fieldData = append(fieldData, subFieldCount...)
+
+		for _, field := range subFields {
+			b, _ := io.ReadAll(&field)
+			fieldData = append(fieldData, b...)
+		}
+
+		// Send transaction
+		if err := m.hlClient.Send(hotline.NewTransaction(
+			hotline.TranUpdateUser,
+			[2]byte{},
+			hotline.NewField(hotline.FieldData, fieldData),
+		)); err != nil {
+			m.logger.Error("Error updating account", "err", err)
+			return errorMsg{text: fmt.Sprintf("Error updating account: %v", err)}
+		}
+
+		m.logger.Info("Account updated successfully")
+
+		// Reset state and return to server UI
+		m.selectedAccount = nil
+		m.isNewAccount = false
+		m.currentScreen = ScreenServerUI
+
+		return nil
+	}
+}
+
+// deleteAccount deletes the selected account from the server
+func (m *Model) deleteAccount() tea.Cmd {
+	return func() tea.Msg {
+		// For delete, send only FieldData with the login
+		loginData := hotline.EncodeString([]byte(m.selectedAccount.login))
+
+		if err := m.hlClient.Send(hotline.NewTransaction(
+			hotline.TranUpdateUser,
+			[2]byte{},
+			hotline.NewField(hotline.FieldData, loginData),
+		)); err != nil {
+			m.logger.Error("Error deleting account", "err", err)
+			return errorMsg{text: fmt.Sprintf("Error deleting account: %v", err)}
+		}
+
+		m.logger.Info("Account deleted successfully")
+
+		// Reset state and return to server UI
+		m.selectedAccount = nil
+		m.currentScreen = ScreenServerUI
+
+		return nil
+	}
 }

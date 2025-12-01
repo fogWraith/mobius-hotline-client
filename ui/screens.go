@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"image/color"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,8 +17,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
 	"github.com/jhalter/mobius/hotline"
+	"github.com/lucasb-eyer/go-colorful"
 	"github.com/muesli/reflow/wordwrap"
 )
 
@@ -44,23 +48,106 @@ var taskCompleteStyle = lipgloss.NewStyle().
 var taskFailedStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("196")) // Red
 
+var categoryStyle = lipgloss.NewStyle().
+	Bold(true).
+	Foreground(lipgloss.Color("170"))
+
+var titleStyle = lipgloss.NewStyle().
+	Bold(true).
+	Foreground(lipgloss.Color("170"))
+
+// Access bit definitions organized by category
+var accessBitsByCategory = []struct {
+	category string
+	bits     []accessBitInfo
+}{
+	{
+		category: "File System Maintenance",
+		bits: []accessBitInfo{
+			{hotline.AccessDeleteFile, "Delete Files", "Can Delete Files"},
+			{hotline.AccessUploadFile, "Upload Files", "Can Upload Files"},
+			{hotline.AccessDownloadFile, "Download Files", "Can Download Files"},
+			{hotline.AccessRenameFile, "Rename Files", "Can Rename Files"},
+			{hotline.AccessMoveFile, "Move Files", "Can Move Files"},
+			{hotline.AccessCreateFolder, "Create Folders", "Can Create Folders"},
+			{hotline.AccessDeleteFolder, "Delete Folders", "Can Delete Folders"},
+			{hotline.AccessRenameFolder, "Rename Folders", "Can Rename Folders"},
+			{hotline.AccessMoveFolder, "Move Folders", "Can Move Folders"},
+			{hotline.AccessUploadAnywhere, "Upload Anywhere", "Can Upload Anywhere"},
+			{hotline.AccessSetFileComment, "Comment Files", "Can Comment Files"},
+			{hotline.AccessSetFolderComment, "Comment Folders", "Can Comment Folders"},
+			{hotline.AccessViewDropBoxes, "View Drop Boxes", "Can View Drop Boxes"},
+			{hotline.AccessMakeAlias, "Make Aliases", "Can Make Aliases"},
+			{hotline.AccessUploadFolder, "Upload Folders", "Can Upload Folders"},
+			{hotline.AccessDownloadFolder, "Download Folders", "Can Download Folders"},
+		},
+	},
+	{
+		category: "Chat",
+		bits: []accessBitInfo{
+			{hotline.AccessReadChat, "Read Chat", "Can Read Chat"},
+			{hotline.AccessSendChat, "Send Chat", "Can Send Chat"},
+			{hotline.AccessOpenChat, "Initiate Private Chat", "Can Initiate Private Chat"},
+		},
+	},
+	{
+		category: "User Maintenance",
+		bits: []accessBitInfo{
+			{hotline.AccessCreateUser, "Create Accounts", "Can Create Accounts"},
+			{hotline.AccessDeleteUser, "Delete Accounts", "Can Delete Accounts"},
+			{hotline.AccessOpenUser, "Read Accounts", "Can Read Accounts"},
+			{hotline.AccessModifyUser, "Modify Accounts", "Can Modify Accounts"},
+			{hotline.AccessDisconUser, "Disconnect Users", "Can Disconnect Users"},
+			{hotline.AccessCannotBeDiscon, "Cannot Be Disconnected", "Cannot be Disconnected"},
+			{hotline.AccessGetClientInfo, "Get User Info", "Can Get User Info"},
+		},
+	},
+	{
+		category: "News",
+		bits: []accessBitInfo{
+			{hotline.AccessNewsReadArt, "Read Articles", "Can Read Articles"},
+			{hotline.AccessNewsPostArt, "Post Articles", "Can Post Articles"},
+			{hotline.AccessNewsDeleteArt, "Delete Articles", "Can Delete Articles"},
+			{hotline.AccessNewsCreateCat, "Create Categories", "Can Create Categories"},
+			{hotline.AccessNewsDeleteCat, "Delete Categories", "Can Delete Categories"},
+			{hotline.AccessNewsCreateFldr, "Create Bundles", "Can Create News Bundles"},
+			{hotline.AccessNewsDeleteFldr, "Delete Bundles", "Can Delete News Bundles"},
+		},
+	},
+	{
+		category: "Messaging",
+		bits: []accessBitInfo{
+			{hotline.AccessBroadcast, "Broadcast", "Can Broadcast"},
+			{hotline.AccessSendPrivMsg, "Send Messages", "Can Send Messages"},
+		},
+	},
+	{
+		category: "Miscellaneous",
+		bits: []accessBitInfo{
+			{hotline.AccessAnyName, "Use Any Name", "Can Use Any Name"},
+			{hotline.AccessNoAgreement, "No Agreement", "Don't Show Agreement"},
+		},
+	},
+}
+
 // serverUIKeyMap defines key bindings for the server UI help display
 type serverUIKeyMap struct {
 	News         key.Binding
 	MessageBoard key.Binding
 	Files        key.Binding
 	Logs         key.Binding
+	Accounts     key.Binding
 	Disconnect   key.Binding
 	Send         key.Binding
 }
 
 func (k serverUIKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.MessageBoard, k.News, k.Files, k.Logs, k.Disconnect}
+	return []key.Binding{k.MessageBoard, k.News, k.Files, k.Logs, k.Accounts, k.Disconnect}
 }
 
 func (k serverUIKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.MessageBoard, k.News, k.Files, k.Logs, k.Disconnect},
+		{k.MessageBoard, k.News, k.Files, k.Logs, k.Accounts, k.Disconnect},
 	}
 }
 
@@ -90,35 +177,35 @@ func (m *Model) renderHome() string {
 		Foreground(lipgloss.Color("214")).
 		Bold(true)
 
-	coloredBanner := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("196")).
-		Bold(true).
-		Render(m.welcomeBanner)
-
-	// Format menu items with styled hotkeys
-	menuItems := []string{
-		fmt.Sprintf("%s Join Server", hotkeyStyle.Render("(j)")),
-		fmt.Sprintf("%s Bookmarks", hotkeyStyle.Render("(b)")),
-		fmt.Sprintf("%s Browse Tracker", hotkeyStyle.Render("(t)")),
-		fmt.Sprintf("%s Settings", hotkeyStyle.Render("(s)")),
-		fmt.Sprintf("%s Quit", hotkeyStyle.Render("(q)")),
-	}
-
-	menu := strings.Join(menuItems, "\n")
+	menu := strings.Join(
+		[]string{
+			fmt.Sprintf("%s Join Server", hotkeyStyle.Render("(j)")),
+			fmt.Sprintf("%s Bookmarks", hotkeyStyle.Render("(b)")),
+			fmt.Sprintf("%s Browse Tracker", hotkeyStyle.Render("(t)")),
+			fmt.Sprintf("%s Settings", hotkeyStyle.Render("(s)")),
+			fmt.Sprintf("%s Quit", hotkeyStyle.Render("(q)")),
+		},
+		"\n",
+	)
 
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
-		coloredBanner,
-		"",
+		lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")).
+			Bold(true).
+			Render(m.welcomeBanner),
 		menu,
 	)
 
+	spew.Fdump(os.Stderr, m.width, m.height, m.currentScreen)
 	return lipgloss.Place(
 		m.width,
 		m.height,
 		lipgloss.Center,
 		lipgloss.Center,
-		content,
+		lipgloss.NewStyle().Render(content),
+		lipgloss.WithWhitespaceChars("猫咪"),
+		lipgloss.WithWhitespaceForeground(subtle),
 	)
 }
 
@@ -684,6 +771,18 @@ func newNewsDelegate() list.DefaultDelegate {
 				key.WithKeys("enter"),
 				key.WithHelp("enter", "select"),
 			),
+			key.NewBinding(
+				key.WithKeys("space"),
+				key.WithHelp("space", "expand/collapse"),
+			),
+			key.NewBinding(
+				key.WithKeys("^P"),
+				key.WithHelp("^P", "new article"),
+			),
+			key.NewBinding(
+				key.WithKeys("esc"),
+				key.WithHelp("esc", "back"),
+			),
 		}
 	}
 
@@ -693,6 +792,18 @@ func newNewsDelegate() list.DefaultDelegate {
 				key.NewBinding(
 					key.WithKeys("enter"),
 					key.WithHelp("enter", "select"),
+				),
+				key.NewBinding(
+					key.WithKeys("space"),
+					key.WithHelp("space", "expand/collapse"),
+				),
+				key.NewBinding(
+					key.WithKeys("^P"),
+					key.WithHelp("^P", "new article"),
+				),
+				key.NewBinding(
+					key.WithKeys("esc"),
+					key.WithHelp("esc", "back"),
 				),
 			},
 		}
@@ -704,21 +815,13 @@ func newNewsDelegate() list.DefaultDelegate {
 func (m *Model) initializeNewsCategoryList(categories []newsItem) {
 	var items []list.Item
 
-	// Add "<- Back" option if we're in a sub-category
-	if len(m.newsPath) > 0 {
-		items = append(items, newsItem{
-			name:     "<- Back",
-			isBundle: true,
-		})
-	}
-
 	// Add the categories/bundles
 	for _, cat := range categories {
 		items = append(items, cat)
 	}
 
 	m.newsList = list.New(items, newNewsDelegate(), m.width, m.height)
-	m.newsList.Title = "News"
+	m.newsList.SetShowTitle(false)
 	m.newsList.SetFilteringEnabled(true)
 	m.newsList.SetShowStatusBar(true)
 	m.newsList.SetShowHelp(true)
@@ -734,12 +837,6 @@ func (m *Model) initializeNewsArticleList(articles []newsArticleItem) {
 	visibleArticles := m.filterVisibleArticles(articles)
 
 	var items []list.Item
-
-	// Add "<- Back" option
-	items = append(items, newsItem{
-		name:     "<- Back",
-		isBundle: true,
-	})
 
 	// Add the visible articles
 	for _, art := range visibleArticles {
@@ -757,7 +854,7 @@ func (m *Model) initializeNewsArticleList(articles []newsArticleItem) {
 	}
 	m.newsList.Title = title
 
-	m.newsList.SetFilteringEnabled(true)
+	m.newsList.SetFilteringEnabled(false)
 	m.newsList.SetShowStatusBar(false) // Disable status bar in split view for space
 	m.newsList.SetShowHelp(true)       // Disable help in split view for space
 	m.newsList.DisableQuitKeybindings()
@@ -776,6 +873,174 @@ func (m *Model) initializeTrackerList(servers []hotline.ServerRecord) {
 	m.trackerList.SetShowStatusBar(true)
 	m.trackerList.SetShowHelp(true)
 	m.trackerList.DisableQuitKeybindings()
+}
+
+func newAccountDelegate() list.DefaultDelegate {
+	d := list.NewDefaultDelegate()
+	d.ShowDescription = true
+	return d
+}
+
+func (m *Model) initializeAccountList(accounts []accountItem) {
+	m.allAccounts = accounts
+
+	items := make([]list.Item, len(accounts))
+	for i, acct := range accounts {
+		items[i] = acct
+	}
+
+	m.accountList = list.New(items, newAccountDelegate(), m.width/2, m.height-10)
+	m.accountList.Title = "User Accounts"
+	m.accountList.SetFilteringEnabled(true)
+	m.accountList.SetShowStatusBar(false)
+	m.accountList.SetShowHelp(false)
+	m.accountList.DisableQuitKeybindings()
+}
+
+func (m *Model) renderAccounts() string {
+	if m.selectedAccount != nil || m.isNewAccount {
+		return m.renderAccountsSplitView()
+	}
+	return m.renderAccountsListOnly()
+}
+
+func (m *Model) renderAccountsListOnly() string {
+	content := m.accountList.View()
+
+	// Add help text
+	help := "\n\n"
+	if m.userAccess.IsSet(hotline.AccessCreateUser) {
+		help += "n: new account  "
+	}
+	help += "enter: view/edit  esc: close"
+
+	return subScreenStyle.Render(content + help)
+}
+
+func (m *Model) renderAccountsSplitView() string {
+	canEdit := m.userAccess.IsSet(hotline.AccessModifyUser) || m.isNewAccount
+
+	// Determine border styles based on focus
+	leftBorderStyle := lipgloss.NormalBorder()
+	rightBorderStyle := lipgloss.NormalBorder()
+	if m.accountDetailFocused {
+		rightBorderStyle = lipgloss.DoubleBorder()
+	} else {
+		leftBorderStyle = lipgloss.DoubleBorder()
+	}
+
+	// Left pane: account list
+	leftPane := lipgloss.NewStyle().
+		Width(m.width / 2).
+		Height(m.height - 10).
+		BorderStyle(leftBorderStyle).
+		BorderRight(true).
+		Render(m.accountList.View())
+
+	// Right pane: account details
+	var rightContent strings.Builder
+
+	if m.isNewAccount {
+		rightContent.WriteString(titleStyle.Render("New Account"))
+	} else {
+		rightContent.WriteString(titleStyle.Render("Account: " + m.selectedAccount.login))
+	}
+	rightContent.WriteString("\n\n")
+
+	// Account fields
+	loginLabel := "Login: "
+	if m.focusedAccessBit == focusLogin {
+		loginLabel = "> " + loginLabel
+	} else {
+		loginLabel = "  " + loginLabel
+	}
+	rightContent.WriteString(loginLabel + m.editedLogin + "\n")
+
+	nameLabel := "Name: "
+	if m.focusedAccessBit == focusName {
+		nameLabel = "> " + nameLabel
+	} else {
+		nameLabel = "  " + nameLabel
+	}
+	rightContent.WriteString(nameLabel + m.editedName + "\n")
+
+	passLabel := "Password: "
+	if m.focusedAccessBit == focusPass {
+		passLabel = "> " + passLabel
+	} else {
+		passLabel = "  " + passLabel
+	}
+	passDisplay := m.editedPassword
+	if len(passDisplay) == 0 {
+		passDisplay = "(not set)"
+	} else {
+		passDisplay = strings.Repeat("*", len(passDisplay))
+	}
+	rightContent.WriteString(passLabel + passDisplay + "\n\n")
+
+	// Access permissions by category
+	focusIndex := 0
+	for _, category := range accessBitsByCategory {
+		rightContent.WriteString(categoryStyle.Render(category.category))
+		rightContent.WriteString("\n")
+
+		for _, bit := range category.bits {
+			checkbox := "[ ]"
+			if m.editedAccessBits.IsSet(bit.bit) {
+				checkbox = "[x]"
+			}
+
+			prefix := "  "
+			if focusIndex == m.focusedAccessBit {
+				prefix = "> "
+			}
+
+			style := lipgloss.NewStyle()
+			if !canEdit {
+				style = style.Foreground(lipgloss.Color("240"))
+			} else if focusIndex == m.focusedAccessBit {
+				style = style.Bold(true)
+			}
+
+			rightContent.WriteString(style.Render(prefix + checkbox + " " + bit.name))
+			rightContent.WriteString("\n")
+
+			focusIndex++
+		}
+		rightContent.WriteString("\n")
+	}
+
+	// Set viewport content
+	m.accountsViewport.SetContent(rightContent.String())
+
+	// Help text
+	helpText := "\n"
+	if canEdit {
+		helpText += "tab: toggle focus  ↑↓: navigate  space: toggle  enter: save  pgup/pgdn: scroll"
+		if !m.isNewAccount && m.userAccess.IsSet(hotline.AccessDeleteUser) {
+			helpText += "  ctrl+d: delete"
+		}
+		helpText += "  esc: cancel"
+	} else {
+		helpText += "tab: toggle focus  esc: close (read-only)"
+	}
+
+	// Render right pane with viewport and border
+	rightPane := lipgloss.NewStyle().
+		Width(m.width/2 - 2).
+		Height(m.height - 10).
+		BorderStyle(rightBorderStyle).
+		BorderLeft(true).
+		Padding(1).
+		Render(m.accountsViewport.View())
+
+	splitView := lipgloss.JoinHorizontal(
+		lipgloss.Left,
+		leftPane,
+		rightPane,
+	)
+
+	return subScreenStyle.Render(splitView + helpText)
 }
 
 func (m *Model) renderTracker() string {
@@ -1185,6 +1450,7 @@ func (m *Model) handleServerUIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Request threaded news - reset path to root
 		m.newsPath = []string{}
 		m.selectedArticle = nil
+		m.isViewingCategory = false // At root, viewing bundles/categories
 		if err := m.hlClient.Send(hotline.NewTransaction(hotline.TranGetNewsCatNameList, [2]byte{})); err != nil {
 			m.logger.Error("Error requesting news categories", "err", err)
 		}
@@ -1203,6 +1469,14 @@ func (m *Model) handleServerUIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := m.hlClient.Send(hotline.NewTransaction(hotline.TranGetFileNameList, [2]byte{})); err != nil {
 			m.logger.Error("Error requesting files", "err", err)
 		}
+		return m, nil
+
+	case "ctrl+a":
+		// Request user accounts list
+		if err := m.hlClient.Send(hotline.NewTransaction(hotline.TranListUsers, [2]byte{})); err != nil {
+			m.logger.Error("Error requesting account list", "err", err)
+		}
+
 		return m, nil
 
 	case "up":
@@ -1300,13 +1574,24 @@ func (m *Model) renderNewsListOnly() string {
 	// Set news list dimensions
 	m.newsList.SetSize(m.width-10, m.height-10)
 
+	newsHeaderStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("170"))
+
 	// Place modal centered with dim gray background
 	return lipgloss.Place(
 		m.width,
 		m.height,
 		lipgloss.Center,
 		lipgloss.Center,
-		subScreenStyle.Render(m.newsList.View()),
+		subScreenStyle.Render(
+			lipgloss.JoinVertical(
+				lipgloss.Left,
+				newsHeaderStyle.Render("News"),
+				m.newsList.View(),
+			),
+		),
+
 		lipgloss.WithWhitespaceBackground(lipgloss.Color("236")),
 	)
 }
@@ -1374,6 +1659,227 @@ func (m *Model) renderNewsSplitView() string {
 
 }
 
+// scrollToFocusedCheckbox scrolls the accounts viewport to keep the focused item visible
+func (m *Model) scrollToFocusedCheckbox() {
+	// Calculate line position of focused item
+	// Account for header (3 lines), Login/Name/Password fields (5 lines including blank)
+	const headerLines = 3
+	const accountFieldLines = 5
+
+	// Count lines up to focused item
+	linePos := headerLines + accountFieldLines
+
+	// If focused on checkbox (0-40), calculate its position
+	if m.focusedAccessBit < 41 {
+		// Count through categories to find line position
+		currentBit := 0
+		for _, category := range accessBitsByCategory {
+			linePos++ // Category header line
+			for range category.bits {
+				if currentBit == m.focusedAccessBit {
+					// Center the focused item in viewport
+					centerOffset := m.accountsViewport.Height / 2
+					targetYOffset := linePos - centerOffset
+					if targetYOffset < 0 {
+						targetYOffset = 0
+					}
+					m.accountsViewport.SetYOffset(targetYOffset)
+					return
+				}
+				linePos++ // Checkbox line
+				currentBit++
+			}
+			linePos++ // Blank line after category
+		}
+	} else {
+		// Focused on text fields at top - scroll to top
+		m.accountsViewport.SetYOffset(0)
+	}
+}
+
+func (m *Model) handleAccountsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// List-only view
+	if m.selectedAccount == nil && !m.isNewAccount {
+		switch msg.String() {
+		case "n":
+			if m.userAccess.IsSet(hotline.AccessCreateUser) {
+				m.isNewAccount = true
+				m.editedLogin = ""
+				m.editedName = ""
+				m.editedPassword = ""
+				m.editedAccessBits = hotline.AccessBitmap{}
+				m.focusedAccessBit = focusLogin
+				return m, nil
+			}
+		case "enter":
+			if item, ok := m.accountList.SelectedItem().(accountItem); ok {
+				m.selectedAccount = &selectedAccountData{
+					login:          item.login,
+					name:           item.name,
+					originalAccess: item.access,
+					hasPassword:    item.hasPass,
+				}
+				m.editedLogin = item.login
+				m.editedName = item.name
+				m.editedPassword = ""
+				m.editedAccessBits = item.access
+				m.passwordChanged = false
+				m.focusedAccessBit = 0
+				return m, nil
+			}
+		case "esc":
+			m.currentScreen = ScreenServerUI
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.accountList, cmd = m.accountList.Update(msg)
+			return m, cmd
+		}
+	}
+
+	// Split view (editing account)
+	canEdit := m.userAccess.IsSet(hotline.AccessModifyUser) || m.isNewAccount
+
+	switch msg.String() {
+	case "tab":
+		// Toggle focus between list and detail panes
+		m.accountDetailFocused = !m.accountDetailFocused
+		return m, nil
+
+	case "esc":
+		m.selectedAccount = nil
+		m.isNewAccount = false
+		m.accountDetailFocused = false // Reset focus
+		return m, nil
+
+	case "up":
+		// Route based on focus
+		if !m.accountDetailFocused {
+			// List focused - pass to list
+			var cmd tea.Cmd
+			m.accountList, cmd = m.accountList.Update(msg)
+			return m, cmd
+		}
+		// Detail focused - navigate checkboxes/fields
+		if canEdit && m.focusedAccessBit > 0 {
+			m.focusedAccessBit--
+			m.scrollToFocusedCheckbox()
+		}
+		return m, nil
+
+	case "down":
+		// Route based on focus
+		if !m.accountDetailFocused {
+			// List focused - pass to list
+			var cmd tea.Cmd
+			m.accountList, cmd = m.accountList.Update(msg)
+			return m, cmd
+		}
+		// Detail focused - navigate checkboxes/fields
+		if canEdit && m.focusedAccessBit < focusPass {
+			m.focusedAccessBit++
+			m.scrollToFocusedCheckbox()
+		}
+		return m, nil
+
+	case "pgup":
+		// Manual viewport scrolling when detail pane focused
+		if m.accountDetailFocused {
+			m.accountsViewport.ViewUp()
+		}
+		return m, nil
+
+	case "pgdown":
+		// Manual viewport scrolling when detail pane focused
+		if m.accountDetailFocused {
+			m.accountsViewport.ViewDown()
+		}
+		return m, nil
+
+	case " ", "space":
+		if canEdit && m.accountDetailFocused {
+			// Map focus index to actual access bit
+			focusIndex := 0
+			for _, category := range accessBitsByCategory {
+				for _, bit := range category.bits {
+					if focusIndex == m.focusedAccessBit {
+						// Toggle the checkbox
+						if m.editedAccessBits.IsSet(bit.bit) {
+							m.editedAccessBits[bit.bit/8] &^= 1 << uint(7-bit.bit%8)
+						} else {
+							m.editedAccessBits.Set(bit.bit)
+						}
+						return m, nil
+					}
+					focusIndex++
+				}
+			}
+		}
+		return m, nil
+
+	case "enter":
+		// If list focused, select account
+		if !m.accountDetailFocused {
+			if item, ok := m.accountList.SelectedItem().(accountItem); ok {
+				m.selectedAccount = &selectedAccountData{
+					login:          item.login,
+					name:           item.name,
+					originalAccess: item.access,
+					hasPassword:    item.hasPass,
+				}
+				m.editedLogin = item.login
+				m.editedName = item.name
+				m.editedPassword = ""
+				m.editedAccessBits = item.access
+				m.passwordChanged = false
+				m.focusedAccessBit = 0
+				m.accountDetailFocused = true // Switch to detail pane
+				return m, nil
+			}
+		}
+		// If detail focused and can edit, submit changes
+		if canEdit && m.accountDetailFocused {
+			return m, m.submitAccountChanges()
+		}
+		return m, nil
+
+	case "ctrl+d":
+		if !m.isNewAccount && m.userAccess.IsSet(hotline.AccessDeleteUser) && m.accountDetailFocused {
+			return m, m.deleteAccount()
+		}
+		return m, nil
+
+	default:
+		// Handle text input for focused fields (only when detail pane focused)
+		if canEdit && m.accountDetailFocused {
+			switch m.focusedAccessBit {
+			case focusLogin:
+				if msg.Type == tea.KeyRunes {
+					m.editedLogin += string(msg.Runes)
+				} else if msg.Type == tea.KeyBackspace && len(m.editedLogin) > 0 {
+					m.editedLogin = m.editedLogin[:len(m.editedLogin)-1]
+				}
+			case focusName:
+				if msg.Type == tea.KeyRunes {
+					m.editedName += string(msg.Runes)
+				} else if msg.Type == tea.KeyBackspace && len(m.editedName) > 0 {
+					m.editedName = m.editedName[:len(m.editedName)-1]
+				}
+			case focusPass:
+				if msg.Type == tea.KeyRunes {
+					m.editedPassword += string(msg.Runes)
+					m.passwordChanged = true
+				} else if msg.Type == tea.KeyBackspace && len(m.editedPassword) > 0 {
+					m.editedPassword = m.editedPassword[:len(m.editedPassword)-1]
+					m.passwordChanged = true
+				}
+			}
+		}
+	}
+
+	return m, nil
+}
+
 func (m *Model) handleNewsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -1418,23 +1924,16 @@ func (m *Model) handleNewsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Otherwise close the news modal
 		m.showNewsModal = false
 		m.newsPath = []string{}
+		m.isViewingCategory = false // Reset state
 		m.selectedArticle = nil
 		return m, nil
 
 	case "ctrl+p":
-		// Only allow posting when viewing article list (not categories)
-		if len(m.newsList.Items()) == 0 {
-			return m, nil
-		}
-
-		// Check if we're in article list by checking first non-back item
-		items := m.newsList.Items()
-		if len(items) > 1 {
-			if _, ok := items[1].(newsArticleItem); ok {
-				cmd := m.initNewsArticlePostForm("", 0) // New post with empty subject and parent ID 0
-				m.currentScreen = ScreenNewsPost
-				return m, cmd
-			}
+		// Only allow posting when viewing a category (not bundles/root)
+		if m.isViewingCategory {
+			cmd := m.initNewsArticlePostForm("", 0) // New post with empty subject and parent ID 0
+			m.currentScreen = ScreenNewsPost
+			return m, cmd
 		}
 		return m, nil
 
@@ -1455,46 +1954,24 @@ func (m *Model) handleNewsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case "ctrl+b":
-		// Only allow creating bundles when viewing bundle/category contents (not articles)
-		items := m.newsList.Items()
-		if len(items) == 0 {
-			return m, nil
+		// Only allow creating bundles when viewing bundle/root (not categories)
+		if !m.isViewingCategory {
+			cmd := m.initNewsBundleForm()
+			m.currentScreen = ScreenNewsPost
+			return m, cmd
 		}
-
-		// Check if we're viewing articles (not allowed)
-		for _, item := range items {
-			if _, ok := item.(newsArticleItem); ok {
-				// We're viewing articles, not bundle contents
-				return m, nil
-			}
-		}
-
-		// We're viewing bundles/categories - open form
-		cmd := m.initNewsBundleForm()
-		m.currentScreen = ScreenNewsPost
-		return m, cmd
+		return m, nil
 
 	case "ctrl+c":
-		// Only allow creating categories when viewing bundle/category contents (not articles)
-		items := m.newsList.Items()
-		if len(items) == 0 {
-			return m, nil
+		// Only allow creating categories when viewing bundle/root (not articles)
+		if !m.isViewingCategory {
+			cmd := m.initNewsCategoryForm()
+			m.currentScreen = ScreenNewsPost
+			return m, cmd
 		}
+		return m, nil
 
-		// Check if we're viewing articles (not allowed)
-		for _, item := range items {
-			if _, ok := item.(newsArticleItem); ok {
-				// We're viewing articles, not bundle contents
-				return m, nil
-			}
-		}
-
-		// We're viewing bundles/categories - open form
-		cmd := m.initNewsCategoryForm()
-		m.currentScreen = ScreenNewsPost
-		return m, cmd
-
-	case " ", "space":
+	case " ":
 		// Toggle expand/collapse for articles with children
 		selectedItem := m.newsList.SelectedItem()
 
@@ -2003,30 +2480,46 @@ func (m *Model) handleLogsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+var subtle = lipgloss.AdaptiveColor{Light: "#D9DCCF", Dark: "#383838"}
+
+var dialogBoxStyle = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(lipgloss.Color("#874BFD")).
+	Padding(1, 0).
+	BorderTop(true).
+	BorderLeft(true).
+	BorderRight(true).
+	BorderBottom(true)
+
+var buttonStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#FFF7DB")).
+	Background(lipgloss.Color("#888B7E")).
+	Padding(0, 3).
+	MarginTop(1)
+
+var activeButtonStyle = buttonStyle.
+	Foreground(lipgloss.Color("#FFF7DB")).
+	Background(lipgloss.Color("#F25D94")).
+	MarginRight(2).
+	Underline(true)
+
 // Modal screen
 func (m *Model) renderModal() string {
 	var b strings.Builder
 
-	b.WriteString(serverTitleStyle.Render(m.modalTitle))
-	b.WriteString("\n\n")
-	b.WriteString(m.modalContent)
-	b.WriteString("\n\n")
+	//b.WriteString(serverTitleStyle.Render(m.modalTitle))
+	b.WriteString(dialogBoxStyle.Render(m.modalContent))
 
-	for i, btn := range m.modalButtons {
-		if i > 0 {
-			b.WriteString("  ")
-		}
-		b.WriteString(fmt.Sprintf("[%d] %s", i+1, btn))
-	}
+	okButton := activeButtonStyle.Render("Yes")
+	cancelButton := buttonStyle.Render("Cancel")
+	buttons := lipgloss.JoinHorizontal(lipgloss.Top, okButton, cancelButton)
+	ui := lipgloss.JoinVertical(lipgloss.Center, m.modalContent, buttons)
 
-	content := boxStyle.Width(60).Render(b.String())
-
-	return lipgloss.Place(
-		m.width,
-		m.height,
-		lipgloss.Center,
-		lipgloss.Center,
-		content,
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		dialogBoxStyle.Render(ui),
+		lipgloss.WithWhitespaceChars("☃︎"),
+		lipgloss.WithWhitespaceForeground(subtle),
 	)
 }
 
@@ -2337,4 +2830,13 @@ func (m *Model) handleTasksKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+func rainbow(base lipgloss.Style, s string, colors []color.Color) string {
+	var str string
+	for i, ss := range s {
+		color, _ := colorful.MakeColor(colors[i%len(colors)])
+		str = str + base.Foreground(lipgloss.Color(color.Hex())).Render(string(ss))
+	}
+	return str
 }
