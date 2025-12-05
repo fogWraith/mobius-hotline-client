@@ -8,12 +8,12 @@ builds:
   - id: "mobius-hotline-client"
     binary: mobius-hotline-client
     env:
-      - CGO_ENABLED=1
+      - CGO_ENABLED=0
     goarch:
       - amd64
       - arm64
     goos:
-      - linux
+      # - linux
       - windows
       - darwin
 
