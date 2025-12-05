@@ -8,7 +8,7 @@ import (
 	"runtime"
 
 	"github.com/charmbracelet/log"
-	"github.com/jhalter/mobius-hotline-client/ui"
+	"github.com/jhalter/mobius-hotline-client/internal"
 	"github.com/muesli/termenv"
 )
 
@@ -17,25 +17,31 @@ var (
 	version = "dev"
 )
 
+var logLevels = map[string]log.Level{
+	"debug": log.DebugLevel,
+	"info":  log.InfoLevel,
+}
+
 func main() {
 	configDir := flag.String("config", defaultConfigPath(), "Path to config root")
+	logLevel := flag.String("log-level", "info", "Log level")
 
 	flag.Parse()
 
 	// init DebugBuffer
-	db := &ui.DebugBuffer{}
+	db := &internal.DebugBuffer{}
 
 	logHandler := log.New(db)
 
 	// Force color output for logger.
 	// By default, the charm logger package disables color for non-TTY.
 	logHandler.SetColorProfile(termenv.TrueColor)
-	logHandler.SetLevel(log.DebugLevel)
+	logHandler.SetLevel(logLevels[*logLevel])
 
 	logger := slog.New(logHandler)
 	logger.Info("Started Mobius client", "Version", version)
 
-	model := ui.NewModel(*configDir, logger, db)
+	model := internal.NewModel(*configDir, logger, db)
 	if err := model.Start(); err != nil {
 		logger.Error("Application error", "err", err)
 		os.Exit(1)
