@@ -7,9 +7,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jhalter/mobius/hotline"
 )
 
 func (m *Model) performFileTransfer(task *Task, refNum [4]byte, transferSize uint32) {
@@ -46,8 +49,8 @@ func (m *Model) performFileTransfer(task *Task, refNum [4]byte, transferSize uin
 
 	// Send HTXF handshake
 	handshake := make([]byte, 16)
-	copy(handshake[0:4], "HTXF")              // Protocol
-	copy(handshake[4:8], refNum[:])           // Reference number
+	copy(handshake[0:4], "HTXF")                              // Protocol
+	copy(handshake[4:8], refNum[:])                           // Reference number
 	binary.BigEndian.PutUint32(handshake[8:12], transferSize) // Data size
 	// handshake[12:16] is RSVD (zeros)
 
@@ -327,6 +330,31 @@ func (m *Model) performFileUpload(task *Task, refNum [4]byte) {
 		return
 	}
 
+	// Calculate total transfer size (needed for HTXF handshake)
+	infoFork := m.createInfoFork(fileInfo)
+
+	// Check for resource fork to include in size calculation
+	resPath := filepath.Join(filepath.Dir(task.LocalPath), "._"+filepath.Base(task.LocalPath))
+	var resForkSize int64
+	hasResourceFork := false
+	if resInfo, err := os.Stat(resPath); err == nil && !resInfo.IsDir() {
+		// Resource fork size = actual size - 82 byte AppleDouble header
+		resForkSize = resInfo.Size() - 82
+		hasResourceFork = resForkSize > 0
+	}
+
+	// Calculate total transfer size:
+	// - FlatFileHeader: 24 bytes
+	// - Info fork: len(infoFork) (includes header + data)
+	// - Data fork header: 16 bytes
+	// - Data fork data: fileInfo.Size()
+	// - Resource fork header (if present): 16 bytes
+	// - Resource fork data (if present): resForkSize
+	totalSize := uint32(24 + len(infoFork) + 16 + int(fileInfo.Size()))
+	if hasResourceFork {
+		totalSize += uint32(16 + int(resForkSize))
+	}
+
 	// Connect to file transfer port (server port + 1)
 	serverAddr := m.hlClient.Connection.RemoteAddr().String()
 	host, port, _ := net.SplitHostPort(serverAddr)
@@ -346,14 +374,14 @@ func (m *Model) performFileUpload(task *Task, refNum [4]byte) {
 		_ = conn.Close()
 	}()
 
-	// Send HTXF handshake
+	// Send HTXF handshake with total transfer size
 	handshake := make([]byte, 16)
 	copy(handshake[0:4], "HTXF")
 	copy(handshake[4:8], refNum[:])
-	binary.BigEndian.PutUint32(handshake[8:12], uint32(fileInfo.Size()))
+	binary.BigEndian.PutUint32(handshake[8:12], totalSize)
 	// handshake[12:16] remains zeros (reserved)
 
-	m.logger.Info("Sending HTXF handshake", "refNum", refNum, "size", fileInfo.Size())
+	m.logger.Info("Sending HTXF handshake", "refNum", refNum, "totalSize", totalSize, "fileSize", fileInfo.Size())
 	if _, err := conn.Write(handshake); err != nil {
 		task.Status = TaskFailed
 		task.Error = fmt.Errorf("handshake failed: %w", err)
@@ -456,21 +484,48 @@ func (m *Model) sendFlattenedFileObject(conn net.Conn, file *os.File, fileInfo o
 	return nil
 }
 
-// createInfoFork creates a minimal info fork header
+// createInfoFork creates a properly formatted Hotline information fork with
+// file metadata including type codes, timestamps, and filename.
+// Returns a complete byte slice containing both the fork header (16 bytes)
+// and the serialized FlatFileInformationFork data.
 func (m *Model) createInfoFork(fileInfo os.FileInfo) []byte {
-	// Info fork contains file metadata
-	// For simplicity, create minimal info fork with empty data
+	// Get file type and creator codes based on file extension
+	ft := hotline.FileTypeFromFilename(fileInfo.Name())
 
-	// Calculate info data size (minimal - empty)
-	infoDataSize := uint32(0)
+	// Convert modification time to Hotline's 8-byte time format
+	mTime := hotline.NewTime(fileInfo.ModTime())
 
-	// Fork header (16 bytes)
-	header := make([]byte, 16)
-	copy(header[0:4], "INFO")                              // Fork type
-	binary.BigEndian.PutUint32(header[12:16], infoDataSize) // Size
+	// Create the information fork using the hotline library constructor
+	infoFork := hotline.NewFlatFileInformationFork(
+		fileInfo.Name(),
+		mTime,
+		ft.TypeCode,
+		ft.CreatorCode,
+	)
 
-	// No info data for basic implementation
-	return header
+	// Serialize the info fork using its io.Reader interface
+	infoForkData, err := io.ReadAll(&infoFork)
+	if err != nil {
+		m.logger.Error("Failed to serialize info fork", "err", err)
+		return []byte{}
+	}
+
+	// Create the fork header using the hotline library struct
+	forkHeader := hotline.FlatFileForkHeader{
+		ForkType: hotline.ForkTypeINFO,
+		DataSize: infoFork.Size(),
+	}
+
+	// Serialize the fork header and combine with info fork data
+	result := slices.Concat(
+		forkHeader.ForkType[:],
+		forkHeader.CompressionType[:],
+		forkHeader.RSVD[:],
+		forkHeader.DataSize[:],
+		infoForkData,
+	)
+
+	return result
 }
 
 // copyWithProgressUpload streams data with progress tracking for uploads
@@ -522,4 +577,15 @@ func (m *Model) copyWithProgressUpload(dst io.Writer, src io.Reader, size int64,
 	})
 
 	return nil
+}
+
+// Helper function to format speed
+func formatSpeed(bytesPerSec float64) string {
+	if bytesPerSec < 1024 {
+		return fmt.Sprintf("%.0f B/s", bytesPerSec)
+	} else if bytesPerSec < 1024*1024 {
+		return fmt.Sprintf("%.1f KB/s", bytesPerSec/1024)
+	} else {
+		return fmt.Sprintf("%.1f MB/s", bytesPerSec/(1024*1024))
+	}
 }

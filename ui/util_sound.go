@@ -23,6 +23,11 @@ const (
 	SoundChatMsg SoundEvent = iota
 	SoundUserJoin
 	SoundUserLeave
+	SoundServerMsg
+	SoundError
+	SoundLoggedIn
+	SoundNewNews
+	SoundTransferComplete
 )
 
 // SoundPlayer manages sound playback for various client events
@@ -50,9 +55,14 @@ func NewSoundPlayer(prefs *Settings, logger *slog.Logger) (*SoundPlayer, error) 
 
 	// Load sound files
 	soundFiles := map[SoundEvent]string{
-		SoundChatMsg:   "sounds/chat-message.wav",
-		SoundUserJoin:  "sounds/user-login.wav",
-		SoundUserLeave: "sounds/user-logout.wav",
+		SoundChatMsg:          "sounds/chat-message.wav",
+		SoundUserJoin:         "sounds/user-login.wav",
+		SoundUserLeave:        "sounds/user-logout.wav",
+		SoundServerMsg:        "sounds/server-message.wav",
+		SoundError:            "sounds/error.wav",
+		SoundLoggedIn:         "sounds/logged-in.wav",
+		SoundNewNews:          "sounds/new-news.wav",
+		SoundTransferComplete: "sounds/transfer-complete.wav",
 	}
 
 	for event, filename := range soundFiles {

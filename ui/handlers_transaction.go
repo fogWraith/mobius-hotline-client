@@ -1,19 +1,29 @@
 package ui
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math/big"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jhalter/mobius/hotline"
 )
+
+// checkTransactionError checks if a transaction has an error response and sends
+// an error message to the UI if one exists.
+// Returns true if an error was found, false otherwise.
+func (m *Model) checkTransactionError(t *hotline.Transaction) bool {
+	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
+		errorText := string(t.GetField(hotline.FieldError).Data)
+		m.program.Send(errorMsg{text: errorText})
+		return true
+	}
+	return false
+}
 
 func (m *Model) HandleKeepAlive(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	return res, err
@@ -37,10 +47,8 @@ func (m *Model) HandleTranServerMsg(ctx context.Context, c *hotline.Client, t *h
 }
 
 func (m *Model) HandleGetFileNameList(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	if t.ErrorCode == [4]byte{0, 0, 0, 1} {
-		m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
-
-		return res, err
+	if m.checkTransactionError(t) {
+		return nil, nil
 	}
 
 	var files []hotline.FileNameWithInfo
@@ -59,6 +67,10 @@ func (m *Model) HandleGetFileNameList(ctx context.Context, c *hotline.Client, t 
 }
 
 func (m *Model) TranGetMsgs(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	if m.checkTransactionError(t) {
+		return nil, nil
+	}
+
 	messageBoardText := string(t.GetField(hotline.FieldData).Data)
 	messageBoardText = strings.ReplaceAll(messageBoardText, "\r", "\n")
 
@@ -141,6 +153,10 @@ func (m *Model) HandleNotifyDeleteUser(ctx context.Context, c *hotline.Client, t
 }
 
 func (m *Model) HandleClientGetUserNameList(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	if m.checkTransactionError(t) {
+		return nil, nil
+	}
+
 	var users []hotline.User
 	for _, field := range t.Fields {
 		if field.Type == hotline.FieldUsernameWithInfo {
@@ -158,28 +174,6 @@ func (m *Model) HandleClientGetUserNameList(ctx context.Context, c *hotline.Clie
 	return res, err
 }
 
-func (m *Model) updateUserListDisplay() {
-	var userListContent strings.Builder
-	for _, u := range m.userList {
-		flagBitmap := big.NewInt(int64(binary.BigEndian.Uint16(u.Flags)))
-		isAdmin := flagBitmap.Bit(hotline.UserFlagAdmin) == 1
-		isAway := flagBitmap.Bit(hotline.UserFlagAway) == 1
-
-		userName := u.Name
-
-		if isAdmin && isAway {
-			userListContent.WriteString(awayAdminUserStyle.Render(userName))
-		} else if isAdmin {
-			userListContent.WriteString(adminUserStyle.Render(userName))
-		} else if isAway {
-			userListContent.WriteString(awayUserStyle.Render(userName))
-		} else {
-			userListContent.WriteString(userName)
-		}
-		userListContent.WriteString("\n")
-	}
-	m.userViewport.SetContent(userListContent.String())
-}
 
 func (m *Model) HandleClientChatMsg(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
 	// Play sound for chat message
@@ -201,16 +195,29 @@ func (m *Model) HandleClientChatMsg(ctx context.Context, c *hotline.Client, t *h
 }
 
 func (m *Model) HandleClientTranUserAccess(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	copy(m.userAccess[:], t.GetField(hotline.FieldUserAccess).Data)
-	m.logger.Debug("Permissions", "AccessNewsDeleteArt", m.userAccess.IsSet(hotline.AccessNewsDeleteArt))
+	if m.checkTransactionError(t) {
+		return nil, nil
+	}
 
-	m.serverUIKeys.News.SetEnabled(m.userAccess.IsSet(hotline.AccessNewsReadArt))
-	m.serverUIKeys.Accounts.SetEnabled(m.userAccess.IsSet(hotline.AccessModifyUser))
+	copy(m.userAccess[:], t.GetField(hotline.FieldUserAccess).Data)
+	m.logger.Debug("Permissions", "bits", fmt.Sprintf("%b", m.userAccess))
+
+	// Enable/disable keybinding depending on access.
+	if m.serverScreen != nil {
+		m.serverScreen.SetUserAccess(m.userAccess)
+	}
+	if m.messageBoardScreen != nil {
+		m.messageBoardScreen.SetUserAccess(m.userAccess)
+	}
 
 	return res, err
 }
 
 func (m *Model) HandleClientTranShowAgreement(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	if m.checkTransactionError(t) {
+		return nil, nil
+	}
+
 	agreement := string(t.GetField(hotline.FieldData).Data)
 	agreement = strings.ReplaceAll(agreement, "\r", "\n")
 
@@ -221,13 +228,8 @@ func (m *Model) HandleClientTranShowAgreement(ctx context.Context, c *hotline.Cl
 }
 
 func (m *Model) HandleClientTranLogin(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
-		errMsg := string(t.GetField(hotline.FieldError).Data)
-
-		m.program.Send(errorMsg{text: errMsg})
-
-		m.logger.Error(errMsg)
-		return nil, errors.New("login error: " + errMsg)
+	if m.checkTransactionError(t) {
+		return nil, errors.New("login error")
 	}
 
 	// Send server connected message with the name to display
@@ -241,6 +243,10 @@ func (m *Model) HandleClientTranLogin(ctx context.Context, c *hotline.Client, t 
 }
 
 func (m *Model) HandleDownloadFile(ctx context.Context, c *hotline.Client, t *hotline.Transaction) ([]hotline.Transaction, error) {
+	if m.checkTransactionError(t) {
+		return nil, nil
+	}
+
 	refNum := t.GetField(hotline.FieldRefNum).Data
 	transferSize := binary.BigEndian.Uint32(t.GetField(hotline.FieldTransferSize).Data)
 	fileSize := binary.BigEndian.Uint32(t.GetField(hotline.FieldFileSize).Data)
@@ -259,6 +265,10 @@ func (m *Model) HandleDownloadFile(ctx context.Context, c *hotline.Client, t *ho
 }
 
 func (m *Model) HandleUploadFile(ctx context.Context, c *hotline.Client, t *hotline.Transaction) ([]hotline.Transaction, error) {
+	if m.checkTransactionError(t) {
+		return nil, nil
+	}
+
 	refNum := t.GetField(hotline.FieldRefNum).Data
 
 	var refNumBytes [4]byte
@@ -268,71 +278,64 @@ func (m *Model) HandleUploadFile(ctx context.Context, c *hotline.Client, t *hotl
 		txID:   t.ID,
 		refNum: refNumBytes,
 	})
+	m.logger.Info("Upload transaction ID: %v", t.ID)
 
 	return nil, nil
 }
 
-func (m *Model) HandleListUsers(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
-		m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
-		return res, err
+func (m *Model) HandleGetFileInfo(ctx context.Context, c *hotline.Client, t *hotline.Transaction) ([]hotline.Transaction, error) {
+	if m.checkTransactionError(t) {
+		return nil, nil
 	}
 
-	var accounts []accountItem
-
-	// Each FieldData contains one account
-	for i, field := range t.Fields {
-		if field.Type != hotline.FieldData {
-			continue
-		}
-
-		var acct accountItem
-		acct.index = i
-
-		// Parse sub-fields from FieldData using scanner
-		scanner := bufio.NewScanner(bytes.NewReader(field.Data[2:]))
-		scanner.Split(hotline.FieldScanner)
-
-		fieldCount := int(binary.BigEndian.Uint16(field.Data[0:2]))
-
-		// Read each sub-field
-		for j := 0; j < fieldCount; j++ {
-			if !scanner.Scan() {
-				break
-			}
-
-			var subField hotline.Field
-			if _, err := subField.Write(scanner.Bytes()); err != nil {
-				m.logger.Error("Error reading sub-field", "err", err)
-				break
-			}
-
-			switch subField.Type {
-			case hotline.FieldUserLogin:
-				acct.login = string(hotline.EncodeString(subField.Data))
-			case hotline.FieldUserName:
-				acct.name = string(subField.Data)
-			case hotline.FieldUserAccess:
-				if len(subField.Data) >= 8 {
-					copy(acct.access[:], subField.Data)
-				}
-			case hotline.FieldUserPassword:
-				acct.hasPass = len(subField.Data) > 0
-			}
-		}
-
-		accounts = append(accounts, acct)
+	// Extract file info fields from response
+	msg := fileInfoMsg{
+		fileName: string(t.GetField(hotline.FieldFileName).Data),
 	}
 
-	m.program.Send(accountListMsg{accounts: accounts})
-	return res, err
+	// Extract type and creator strings with nil checks
+	if typeField := t.GetField(hotline.FieldFileTypeString); typeField != nil {
+		msg.fileTypeString = string(typeField.Data)
+	}
+	if creatorField := t.GetField(hotline.FieldFileCreatorString); creatorField != nil {
+		msg.fileCreatorString = string(creatorField.Data)
+	}
+
+	// Extract fixed-size fields
+	fileTypeData := t.GetField(hotline.FieldFileType).Data
+	if len(fileTypeData) >= 4 {
+		copy(msg.fileType[:], fileTypeData[:4])
+	}
+
+	createDateField := t.GetField(hotline.FieldFileCreateDate)
+	if createDateField != nil && len(createDateField.Data) >= 8 {
+		copy(msg.createDate[:], createDateField.Data[:8])
+	}
+
+	modifyDateField := t.GetField(hotline.FieldFileModifyDate)
+	if modifyDateField != nil && len(modifyDateField.Data) >= 8 {
+		copy(msg.modifyDate[:], modifyDateField.Data[:8])
+	}
+
+	// Extract optional fields
+	commentField := t.GetField(hotline.FieldFileComment)
+	if commentField != nil && len(commentField.Data) > 0 {
+		msg.comment = string(commentField.Data)
+	}
+
+	fileSizeField := t.GetField(hotline.FieldFileSize)
+	if fileSizeField != nil && len(fileSizeField.Data) >= 4 {
+		msg.fileSize = binary.BigEndian.Uint32(fileSizeField.Data)
+		msg.hasFileSize = true
+	}
+
+	m.program.Send(msg)
+	return nil, nil
 }
 
 func (m *Model) HandleGetNewsCatNameList(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	if t.ErrorCode == [4]byte{0, 0, 0, 1} {
-		m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
-
-		return res, err
+	if m.checkTransactionError(t) {
+		return nil, nil
 	}
 
 	var categories []newsItem
@@ -365,9 +368,8 @@ func (m *Model) HandleGetNewsCatNameList(ctx context.Context, c *hotline.Client,
 }
 
 func (m *Model) HandleGetNewsArtNameList(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	if t.ErrorCode == [4]byte{0, 0, 0, 1} {
-		m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
-		return res, err
+	if m.checkTransactionError(t) {
+		return nil, nil
 	}
 
 	var articles []newsArticleItem
@@ -463,10 +465,8 @@ func (m *Model) HandleGetNewsArtNameList(ctx context.Context, c *hotline.Client,
 }
 
 func (m *Model) HandleGetNewsArtData(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	if t.ErrorCode == [4]byte{0, 0, 0, 1} {
-		m.program.Send(errorMsg{text: string(t.GetField(hotline.FieldError).Data)})
-
-		return res, err
+	if m.checkTransactionError(t) {
+		return nil, nil
 	}
 
 	// Parse article data from transaction fields
@@ -488,12 +488,9 @@ func (m *Model) HandleGetNewsArtData(ctx context.Context, c *hotline.Client, t *
 }
 
 func (m *Model) HandlePostNewsArt(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	// Check for errors
-	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
-		errMsg := string(t.GetField(hotline.FieldError).Data)
-		m.program.Send(errorMsg{text: "Failed to post article: " + errMsg})
-		m.logger.Error("Error posting news article", "error", errMsg)
-		return res, err
+	if m.checkTransactionError(t) {
+		m.logger.Error("Error posting news article")
+		return nil, nil
 	}
 
 	m.logger.Info("News article posted successfully")
@@ -501,13 +498,9 @@ func (m *Model) HandlePostNewsArt(ctx context.Context, c *hotline.Client, t *hot
 }
 
 func (m *Model) HandleNewNewsFldr(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	// Check for errors
-	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
-		errMsg := string(t.GetField(hotline.FieldError).Data)
-		m.program.Send(errorMsg{text: "Failed to create bundle: " + errMsg})
-
-		m.logger.Error("Error creating news bundle", "error", errMsg)
-		return res, err
+	if m.checkTransactionError(t) {
+		m.logger.Error("Error creating news bundle")
+		return nil, nil
 	}
 
 	m.logger.Info("News bundle created successfully")
@@ -515,16 +508,24 @@ func (m *Model) HandleNewNewsFldr(ctx context.Context, c *hotline.Client, t *hot
 }
 
 func (m *Model) HandleNewNewsCat(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
-	m.program.Send(errorMsg{text: "Failed to create category: " + "errMsg"})
-	// Check for errors
-	if t.ErrorCode != [4]byte{0, 0, 0, 0} {
-		errMsg := string(t.GetField(hotline.FieldError).Data)
-		m.program.Send(errorMsg{text: "Failed to create category: " + errMsg})
-
-		m.logger.Error("Error creating news category", "error", errMsg)
-		return res, err
+	if m.checkTransactionError(t) {
+		m.logger.Error("Error creating news category")
+		return nil, nil
 	}
 
 	m.logger.Info("News category created successfully")
+	return res, err
+}
+
+func (m *Model) HandleTranAgreed(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	if m.checkTransactionError(t) {
+		return nil, nil
+	}
+
+	m.NavigateTo(ScreenServerUI)
+	if err := c.Send(hotline.NewTransaction(hotline.TranGetUserNameList, [2]byte{})); err != nil {
+		m.logger.Error("err", "err", err)
+	}
+
 	return res, err
 }
