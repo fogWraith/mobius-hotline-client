@@ -1,10 +1,12 @@
+//go:build !linux
+
 package internal
 
 import (
 	"embed"
+	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -35,21 +37,20 @@ type SoundPlayer struct {
 	enabled bool
 	sounds  map[SoundEvent]*beep.Buffer
 	mu      sync.Mutex
-	logger  *slog.Logger
 }
 
-// NewSoundPlayer creates and initializes a new sound player
-func NewSoundPlayer(prefs *Settings, logger *slog.Logger) (*SoundPlayer, error) {
+// NewSoundPlayer creates and initializes a new sound player.
+// Returns the SoundPlayer and any errors encountered while loading sound files.
+// Speaker initialization failure is fatal; sound file load failures are non-fatal.
+func NewSoundPlayer(enabled bool) (*SoundPlayer, error) {
 	sp := &SoundPlayer{
-		enabled: prefs.EnableSounds,
+		enabled: enabled,
 		sounds:  make(map[SoundEvent]*beep.Buffer),
-		logger:  logger,
 	}
 
 	// Initialize the speaker (44.1kHz sample rate, 4096 buffer size)
 	sampleRate := beep.SampleRate(44100)
-	err := speaker.Init(sampleRate, 4096)
-	if err != nil {
+	if err := speaker.Init(sampleRate, 4096); err != nil {
 		return nil, fmt.Errorf("failed to initialize speaker: %w", err)
 	}
 
@@ -65,14 +66,14 @@ func NewSoundPlayer(prefs *Settings, logger *slog.Logger) (*SoundPlayer, error) 
 		SoundTransferComplete: "sounds/transfer-complete.wav",
 	}
 
+	var loadErrs []error
 	for event, filename := range soundFiles {
 		if err := sp.loadSound(event, filename, sampleRate); err != nil {
-			logger.Warn("Failed to load sound file", "file", filename, "error", err)
-			// Continue loading other sounds even if one fails
+			loadErrs = append(loadErrs, fmt.Errorf("%s: %w", filename, err))
 		}
 	}
 
-	return sp, nil
+	return sp, errors.Join(loadErrs...)
 }
 
 // loadSound loads and decodes a WAV file into a buffer
@@ -111,7 +112,6 @@ func (sp *SoundPlayer) PlayAsync(event SoundEvent) {
 	sp.mu.Unlock()
 
 	if !exists {
-		sp.logger.Debug("Sound event not found", "event", event)
 		return
 	}
 
@@ -124,13 +124,10 @@ func (sp *SoundPlayer) PlayAsync(event SoundEvent) {
 			done <- true
 		})))
 
-		// Wait for playback to complete with timeout
+		// Wait for playback to complete with timeout to prevent goroutine leak
 		select {
 		case <-done:
-			// Playback completed
 		case <-time.After(5 * time.Second):
-			// Timeout to prevent goroutine leak
-			sp.logger.Warn("Sound playback timeout", "event", event)
 		}
 	}()
 }

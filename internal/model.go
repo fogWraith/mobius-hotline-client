@@ -266,11 +266,9 @@ func NewModel(cfgPath string, logger *slog.Logger, db *DebugBuffer) *Model {
 	startDir, _ := os.UserHomeDir()
 
 	// Initialize sound player
-	soundPlayer, err := NewSoundPlayer(prefs, logger)
+	soundPlayer, err := NewSoundPlayer(prefs.EnableSounds)
 	if err != nil {
 		logger.Error("Failed to initialize sound player", "err", err)
-		// Non-fatal - continue without sounds
-		soundPlayer = nil
 	}
 
 	return &Model{
