@@ -45,6 +45,11 @@ func (m *Model) HandleKeepAlive(ctx context.Context, c *hotline.Client, t *hotli
 }
 
 func (m *Model) HandleTranServerMsg(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	// Play sound for private message
+	if m.soundPlayer != nil {
+		m.soundPlayer.PlayAsync(SoundServerMsg)
+	}
+
 	now := time.Now().Format(time.RFC850)
 
 	msg := strings.ReplaceAll(string(t.GetField(hotline.FieldData).Data), "\r", "\n")
@@ -537,6 +542,13 @@ func (m *Model) HandleNewNewsCat(ctx context.Context, c *hotline.Client, t *hotl
 	}
 
 	m.logger.Info("News category created successfully")
+	return res, err
+}
+
+func (m *Model) HandleNewMsg(ctx context.Context, c *hotline.Client, t *hotline.Transaction) (res []hotline.Transaction, err error) {
+	if m.soundPlayer != nil {
+		m.soundPlayer.PlayAsync(SoundNewNews)
+	}
 	return res, err
 }
 

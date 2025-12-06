@@ -606,6 +606,7 @@ func (m *Model) Start() error {
 	m.hlClient.HandleFunc(hotline.TranKeepAlive, m.HandleKeepAlive)
 	m.hlClient.HandleFunc(hotline.TranListUsers, m.HandleListUsers)
 	m.hlClient.HandleFunc(hotline.TranLogin, m.HandleClientTranLogin)
+	m.hlClient.HandleFunc(hotline.TranNewMsg, m.HandleNewMsg)
 	m.hlClient.HandleFunc(hotline.TranNewNewsCat, m.HandleNewNewsCat)
 	m.hlClient.HandleFunc(hotline.TranNewNewsFldr, m.HandleNewNewsFldr)
 	m.hlClient.HandleFunc(hotline.TranNotifyChangeUser, m.HandleNotifyChangeUser)
