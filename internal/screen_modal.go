@@ -88,13 +88,20 @@ func (s *ModalScreen) initForm() {
 	keyMap := huh.NewDefaultKeyMap()
 	keyMap.Confirm.Toggle.SetKeys("left", "right", "h", "l", "tab")
 
+	// Create theme without left border
+	theme := huh.ThemeCharm()
+	theme.Focused.Base = theme.Focused.Base.
+		UnsetBorderLeft().
+		UnsetBorderStyle()
+
 	s.form = huh.NewForm(
 		huh.NewGroup(confirmField),
 	).
 		WithWidth(60).
 		WithShowHelp(false).
 		WithShowErrors(false).
-		WithKeyMap(keyMap)
+		WithKeyMap(keyMap).
+		WithTheme(theme)
 }
 
 // Init returns initial commands
