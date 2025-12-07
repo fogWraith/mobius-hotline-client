@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -14,6 +15,17 @@ import (
 
 	"github.com/jhalter/mobius/hotline"
 )
+
+// dialTransfer connects to the server's transfer port using TLS when the
+// control connection is TLS, otherwise falls back to plain TCP.
+func (m *Model) dialTransfer(addr string) (net.Conn, error) {
+	if m.connectionUsesTLS {
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		return tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{InsecureSkipVerify: true})
+	}
+
+	return net.DialTimeout("tcp", addr, 10*time.Second)
+}
 
 func (m *Model) performFileTransfer(task *Task, refNum [4]byte, transferSize uint32) {
 	defer func() {
@@ -34,9 +46,9 @@ func (m *Model) performFileTransfer(task *Task, refNum [4]byte, transferSize uin
 	portInt, _ := strconv.Atoi(port)
 	ftAddr := net.JoinHostPort(host, strconv.Itoa(portInt+1))
 
-	m.logger.Info("Connecting to file transfer server", "addr", ftAddr, "refNum", refNum)
+	m.logger.Info("Connecting to file transfer server", "addr", ftAddr, "refNum", refNum, "tls", m.connectionUsesTLS)
 
-	conn, err := net.DialTimeout("tcp", ftAddr, 10*time.Second)
+	conn, err := m.dialTransfer(ftAddr)
 	if err != nil {
 		task.Status = TaskFailed
 		task.Error = fmt.Errorf("connection failed: %w", err)
@@ -361,9 +373,9 @@ func (m *Model) performFileUpload(task *Task, refNum [4]byte) {
 	portInt, _ := strconv.Atoi(port)
 	ftAddr := net.JoinHostPort(host, strconv.Itoa(portInt+1))
 
-	m.logger.Info("Connecting to file transfer server", "addr", ftAddr, "refNum", refNum)
+	m.logger.Info("Connecting to file transfer server", "addr", ftAddr, "refNum", refNum, "tls", m.connectionUsesTLS)
 
-	conn, err := net.DialTimeout("tcp", ftAddr, 10*time.Second)
+	conn, err := m.dialTransfer(ftAddr)
 	if err != nil {
 		task.Status = TaskFailed
 		task.Error = fmt.Errorf("connection failed: %w", err)
