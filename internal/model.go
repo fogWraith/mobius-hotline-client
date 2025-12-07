@@ -662,7 +662,7 @@ func (m *Model) joinServer(addr, login, password string, useTLS bool) error {
 		err = m.hlClient.Send(
 			hotline.NewTransaction(
 				hotline.TranLogin, [2]byte{0, 0},
-				hotline.NewField(hotline.FieldVersion, []byte{0x4d, 0x42}),
+				hotline.NewField(hotline.FieldVersion, []byte{0x01, 0x5E}), //350
 				hotline.NewField(hotline.FieldUserName, []byte(m.prefs.Username)),
 				hotline.NewField(hotline.FieldUserIconID, m.prefs.IconBytes()),
 				hotline.NewField(hotline.FieldUserLogin, hotline.EncodeString([]byte(login))),
