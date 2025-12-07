@@ -84,6 +84,7 @@ type Model struct {
 	connectionCtx       context.Context
 	connectionCtxCancel context.CancelFunc
 	clientDisconnecting bool
+	connectionUsesTLS   bool
 
 	// Screens
 	homeScreen             *HomeScreen
@@ -624,6 +625,7 @@ func (m *Model) joinServer(addr, login, password string, useTLS bool) error {
 	// Create cancellable context for this connection
 	m.connectionCtx, m.connectionCtxCancel = context.WithCancel(context.Background())
 	m.clientDisconnecting = false
+	m.connectionUsesTLS = false
 
 	// Append default port to address if no port supplied
 	if len(strings.Split(addr, ":")) == 1 {
@@ -646,6 +648,7 @@ func (m *Model) joinServer(addr, login, password string, useTLS bool) error {
 			}
 			return fmt.Errorf("TLS connection error: %v", err)
 		}
+		m.connectionUsesTLS = true
 
 		// Perform handshake
 		if err := m.hlClient.Handshake(); err != nil {
@@ -678,6 +681,7 @@ func (m *Model) joinServer(addr, login, password string, useTLS bool) error {
 			}
 			return fmt.Errorf("error joining server: %v", err)
 		}
+		m.connectionUsesTLS = false
 	}
 
 	go func() {
